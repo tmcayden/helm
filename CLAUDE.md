@@ -440,13 +440,49 @@ is in the **`surfaces`** skill.
   fixture home cannot log in. Measuring the user settings layer means using the
   real `~/.claude/settings.json`, snapshotted and put back.
 
+## How a change gets done
+
+The default is the ordinary one, and it is the whole of it:
+
+- **A bug**: reproduce it first, build a test if nothing covers it, fix it, and
+  make the covering tests pass.
+- **A feature**: implement it, cover it, make the tests pass.
+
+`pnpm check` - typecheck, lint, tests - is the gate. It is fast and hermetic and
+it runs every time. Nothing else runs unless one of two things is true: the
+change is in the narrow set where **only a real window can answer** - the
+terminal and the pty, the browser pane's native views, overlay composition on
+disk - in which case it owes **the one check that covers it**, narrowed with
+`--only=` wherever that fits; or somebody asked for it.
+
+**A release is not a testing event.** "Cut a release" means bump the version,
+write the changelog section, merge, push. CI runs the fast tier, and
+`verify-artifact.mjs` over both exes on publish. `packaging-check` is for a
+release that **changes packaging** - electron-builder, the native modules,
+`dist-win.mjs`, where files land - and is not owed by one that does not. If a
+particular release looks like it needs more, say so in a sentence and proceed
+anyway; the decision to spend the time is the owner's, and silence costs less
+than ceremony.
+
+**Measure until the answer changes what you do, then stop.** "Measure rather
+than assume" is why the diagnoses in this repository hold up, and on its own it
+has no stopping rule - so a measurement campaign runs well past its own verdict.
+Three trials establish a deterministic result; more is earned only once variance
+has actually been seen. Reproduce the bug, not the mechanism around it.
+
 ## Checks
 
-They drive the **real window** and most spawn real `claude` sessions. They are
-the only coverage `packages/ui` and `packages/desktop` have - every unit test
-lives in `packages/core` - so **a change to a surface a check covers is not done
-until that check is green.** They sit outside `pnpm check` deliberately: that
-stays fast and hermetic, these take minutes and cost tokens.
+They drive the **real window** and most spawn real `claude` sessions, so they
+take minutes and cost tokens. That price buys the one thing nothing else does:
+they are where a bug in the **real stack** is found - Chromium's own editing
+commands, ConPTY, what a native view actually paints - which no unit test can
+reach. So they are a tool for **discovery**, and a gate only for the surfaces
+where only a real window can answer. Regression is the fast tier's job.
+
+They are also, for now, the only coverage `packages/ui` and `packages/desktop`
+have - every unit test lives in `packages/core` - and closing that gap is what
+makes the rest of this honest, because "run the fast suite" currently means
+running nothing for most of the app.
 
 The **`checks`** skill has the table of which one a change owes, what each does,
 and how to narrow a re-run. Two rules belong here rather than there:
@@ -475,10 +511,8 @@ and how to narrow a re-run. Two rules belong here rather than there:
   real `%APPDATA%\Helm`. Everything else in `packaging-check`, `--only=audit`
   included, is safe and expected.
   When a change owes coverage only that tool would give, **report
-  the omission** - a standing exception to "a change to a surface a check covers
-  is not done until that check is green", and the omission is reported rather
-  than quietly closed. Say it out loud to a subagent too, which otherwise reads
-  "the checks this change owes" as the whole suite.
+  the omission** rather than quietly closing it. Say it out loud to a subagent
+  too, which otherwise reads "the checks this change owes" as the whole suite.
 
 ## Scope
 
