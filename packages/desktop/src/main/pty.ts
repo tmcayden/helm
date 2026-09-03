@@ -328,7 +328,19 @@ export interface PtyHandle {
   /** Everything the host has written *to* the process - the input side of the
    * wire, which is where bracketed paste and key encoding are provable. */
   input: () => string
+  /**
+   * The same bytes, still separated into the writes that carried them.
+   *
+   * One `pty:input` message is one `p.write`, and the renderer sends one per
+   * xterm `onData`, so this counts a keystroke's data events at the wire - the
+   * only place a driver can count them without instrumenting the page under
+   * test. It exists because "one Ctrl+V produced one paste" cannot be settled
+   * from `input()`: a stream carrying the paste twice contains a correct one,
+   * and every substring test over it passes. C5.
+   */
+  chunks: () => string[]
   clearOutput: () => void
+  /** Clears `input()` and `chunks()` together - they are one record. */
   clearInput: () => void
   exited: () => number | null
 }
@@ -344,6 +356,7 @@ export function spawnPty(win: BrowserWindow, opts: SpawnOptions): PtyHandle {
 
   let out = ''
   let inp = ''
+  let inChunks: string[] = []
   let exitCode: number | null = null
 
   p.onData((chunk) => {
@@ -358,19 +371,23 @@ export function spawnPty(win: BrowserWindow, opts: SpawnOptions): PtyHandle {
     pty: p,
     output: () => out,
     input: () => inp,
+    chunks: () => [...inChunks],
     clearOutput: () => {
       out = ''
     },
     clearInput: () => {
       inp = ''
+      inChunks = []
     },
     exited: () => exitCode
   }
   // Record host->process bytes regardless of who writes them, so the driver can
-  // assert on the exact encoding of a keystroke or a paste.
+  // assert on the exact encoding of a keystroke or a paste - and on how many
+  // writes carried it, which is a different question and the one C5 asks.
   const rawWrite = p.write.bind(p)
   p.write = (data: string): void => {
     inp += data
+    inChunks.push(data)
     rawWrite(data)
   }
 

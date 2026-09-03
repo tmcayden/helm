@@ -358,6 +358,65 @@ function attachKeyBindings(term: Terminal, hooks: TerminalHooks): void {
     if (text) term.paste(text)
   }
 
+  /**
+   * "Helm has dealt with this keystroke." Both halves, and the second one is
+   * the half that was missing.
+   *
+   * Returning `false` from a custom key event handler only stops **xterm's**
+   * translation. xterm 6.0.0's `_keyDown` returns on the spot for a `false`
+   * (`CoreBrowserTerminal.ts`, the `_customKeyEventHandler` test) and so never
+   * reaches its own `cancel(event, true)` - so the keydown's default action
+   * still stands, and Blink's built-in editing key-binding table performs the
+   * native command inside the renderer, on top of whatever the branch here
+   * already did. Every branch below is a keystroke Helm answers itself, so
+   * every one of them has to cancel that.
+   *
+   * Both halves of ClickUp 868m0egkt are that second write, measured on
+   * Electron 43.3.0 / xterm 6.0.0:
+   *
+   *  - **Paste doubled.** One Ctrl+V with a 17-character clipboard produced a
+   *    native `paste` event at xterm's own helper textarea at +0.7ms - xterm
+   *    listens for `paste` on the textarea *and* on the element - and then
+   *    Helm's `clipboard:read` at +2.3ms. Two `onData` calls, 34 bytes at the
+   *    pty, the text on screen twice; with bracketed paste on, two complete
+   *    envelopes, so a composer receives the paste twice. 3/3, deterministic.
+   *    Ctrl+Shift+V is the same event: Chromium reads it as
+   *    PasteAndMatchStyle, which is still a paste at the textarea.
+   *  - **Copy went stale.** `rightClickHandler` (xterm's `Clipboard.ts`) writes
+   *    the current selection into that textarea and calls `select()` on it, so
+   *    after any right-click over the pane there is a real DOM selection for
+   *    Blink's Copy to act on. Blink issues its clipboard write at +0.2ms and
+   *    it completes *after* the IPC write here resolves at +0.4ms, so Blink is
+   *    deterministically the last writer and the clipboard keeps whatever was
+   *    selected at the time of the right-click. 13/13, sticky, and a later
+   *    left-click does not clear it.
+   *
+   *    Two of xterm's own listeners are why that lands where it does. It also
+   *    registers a `copy` listener, which would have substituted the live
+   *    selection - but it opens `if (!this.hasSelection()) return`, and the
+   *    branch below has already called `term.clearSelection()` by the time the
+   *    default action runs. So xterm's guard bows out and Blink copies the
+   *    textarea unopposed. Clearing the selection is right and stays; what was
+   *    missing is the cancel.
+   *
+   * **None of this is an xterm bug, and that is the sentence worth keeping.**
+   * `rightClickHandler` is inert in stock xterm: its `_keyDown` translates
+   * Ctrl+C itself and ends at `cancel(event, true)`, so Chromium never runs its
+   * editing command and nothing ever reads that textarea. Helm's early
+   * `return false` is the only reason the native Copy runs at all. Within one
+   * keystroke, whether it fires is decided by nothing but whether this handler
+   * returned false - which is why Ctrl+C with **no** selection was always
+   * correct, since that case falls through to xterm and is cancelled there.
+   * The asymmetry is Helm's own, so the remedy is Helm's own.
+   *
+   * `pnpm fidelity` C5 and C7 are the regression. Both are counts rather than
+   * substring matches, because a doubled stream contains a correct one.
+   */
+  const handled = (e: KeyboardEvent): false => {
+    e.preventDefault()
+    return false
+  }
+
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
     hooks.onKeyDown?.(performance.now())
@@ -367,6 +426,16 @@ function attachKeyBindings(term: Terminal, hooks: TerminalHooks): void {
     // sequences Claude Code's composer accepts as an inline newline - ESC CR,
     // LF, CSI 13;2u and backslash-CR all work - and ESC CR is the conventional
     // meta-Enter, so that is what the host emits.
+    //
+    // Its native default action is `insertLineBreak` into xterm's helper
+    // textarea, and unlike the clipboard chords that has never produced a
+    // second write: xterm's `_inputEvent` fires a data event only for
+    // `inputType === 'insertText'`, so the resulting `input` event is dropped.
+    // It is cancelled anyway, for the reason the branch exists at all - Helm
+    // emitted the sequence, so the keystroke is spent - and because "harmless"
+    // there rests on Blink's editing table and on that one filter in xterm,
+    // neither of which Helm controls, while the cost of the accumulating
+    // newlines is a textarea nothing here ever reads. Latent, not measured.
     if (
       e.shiftKey &&
       !e.ctrlKey &&
@@ -374,26 +443,30 @@ function attachKeyBindings(term: Terminal, hooks: TerminalHooks): void {
       (e.code === 'Enter' || e.code === 'NumpadEnter')
     ) {
       hooks.onInput('\x1b\r')
-      return false
+      return handled(e)
     }
 
     const mod = e.ctrlKey && !e.altKey
+    // Ctrl+Shift+C and Ctrl+Shift+V: Chromium binds an editing command to the
+    // second of these (PasteAndMatchStyle) and, as measured, nothing to the
+    // first. They are cancelled alike regardless, because which chords Blink
+    // has a command for is not a fact about Helm and is not one to encode here.
     if (mod && e.shiftKey && e.code === 'KeyC') {
       void copy()
-      return false
+      return handled(e)
     }
     if (mod && e.shiftKey && e.code === 'KeyV') {
       void paste()
-      return false
+      return handled(e)
     }
     if (mod && !e.shiftKey && e.code === 'KeyC' && term.hasSelection()) {
       void copy()
       term.clearSelection()
-      return false
+      return handled(e)
     }
     if (mod && !e.shiftKey && e.code === 'KeyV') {
       void paste()
-      return false
+      return handled(e)
     }
 
     const isModifierOnly = ['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)

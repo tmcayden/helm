@@ -1,7 +1,13 @@
 import type { IBufferCell } from '@xterm/xterm'
 import type { TerminalHost } from './terminal'
 import type { LatencyRecorder } from './latency'
-import type { CellProbe, GeometryProbe, ProbeOp, ViewportProbe } from '../../shared/protocol'
+import type {
+  CellProbe,
+  GeometryProbe,
+  HelperTextareaProbe,
+  ProbeOp,
+  ViewportProbe
+} from '../../shared/protocol'
 
 /**
  * Read-only (plus a few driving) hooks into a live terminal, so the fidelity
@@ -143,6 +149,19 @@ export function makeProbeHandler(
 
       case 'lastWheel':
         return { wheel: host.lastWheel() }
+
+      // xterm's helper textarea, read and never written. See HelperTextareaProbe.
+      case 'helperTextarea': {
+        const el = host.element.querySelector('.xterm-helper-textarea')
+        const ta = el instanceof HTMLTextAreaElement ? el : null
+        const answer: HelperTextareaProbe = {
+          value: ta ? ta.value : null,
+          selectionStart: ta ? ta.selectionStart : null,
+          selectionEnd: ta ? ta.selectionEnd : null,
+          focused: ta !== null && document.activeElement === ta
+        }
+        return answer
+      }
 
       case 'latencyStart':
         latency.arm(req.char)
