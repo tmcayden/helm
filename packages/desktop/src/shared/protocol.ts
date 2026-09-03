@@ -70,6 +70,27 @@ export type ProbeOp =
   | { op: 'latencyResults' }
   | { op: 'unicodeVersion' }
   | { op: 'lastWheel' }
+  | { op: 'helperTextarea' }
+
+/**
+ * The state of xterm's own helper textarea, which is where the native editing
+ * commands land.
+ *
+ * Read-only, and it exists for one probe: `rightClickHandler` puts the live
+ * selection into that element and calls `select()` on it, which is what gives
+ * Chromium's built-in Copy a DOM selection to act on. C7 has to establish that
+ * the poisoning actually happened before it can claim anything from the
+ * clipboard afterwards - an empty textarea would make the whole probe pass for
+ * the wrong reason.
+ */
+export interface HelperTextareaProbe {
+  /** Null when the element is not in the document at all. */
+  value: string | null
+  selectionStart: number | null
+  selectionEnd: number | null
+  /** Whether it is `document.activeElement`; a blurred one is not copied from. */
+  focused: boolean
+}
 
 export interface GeometryProbe {
   /** CSS pixels, relative to the page. */

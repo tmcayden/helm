@@ -14,6 +14,26 @@ A version with no section here does not release: the workflow fails rather than
 publishing an empty body, because the step a person can skip is the step that
 gets skipped.
 
+## 1.1.1
+
+Pasting into a terminal put your text in twice, and copying could silently hand
+you something you selected minutes ago. Both are fixed, and both turned out to
+be the same missing line.
+
+**Paste lands once**
+
+- Ctrl+V and Ctrl+Shift+V now paste the clipboard once. Every paste used to
+  arrive twice: a composer received your text doubled, and a shell ran the line
+  twice.
+
+**Copy gives you what you selected**
+
+- A right-click anywhere in a terminal used to quietly break copying. From that
+  moment Ctrl+C put whatever had been selected at the time of the right-click on
+  your clipboard rather than what was selected now, it stayed that way for the
+  life of the tab, and nothing on screen suggested anything had happened. Ctrl+C
+  now copies the live selection.
+
 ## 1.1.0
 
 Helm can now tell you what your agents are doing, and your agents can tell each

@@ -100,6 +100,27 @@ export async function sendMouse(
 }
 
 /**
+ * A right-click, as the platform delivers one.
+ *
+ * Both halves are sent because the `contextmenu` event is Blink's own reaction
+ * to the platform event rather than something a driver can raise, and on
+ * Windows it comes off the **release**. A driver that sends only the press gets
+ * no `contextmenu` and therefore measures nothing.
+ *
+ * This exists for C7, where the right-click is not incidental: xterm's
+ * `rightClickHandler` writes the live selection into the helper textarea and
+ * selects it there, which is the state that made Chromium's built-in Copy win
+ * every later Ctrl+C.
+ */
+export async function rightClick(win: BrowserWindow, x: number, y: number): Promise<void> {
+  const at = { x: Math.round(x), y: Math.round(y), button: 'right' as const, clickCount: 1 }
+  win.webContents.sendInputEvent({ type: 'mouseDown', ...at })
+  await sleep(20)
+  win.webContents.sendInputEvent({ type: 'mouseUp', ...at })
+  await sleep(60)
+}
+
+/**
  * A drag, with the button actually held for the moves in the middle.
  *
  * This exists because getting it wrong is invisible. `sendMouse` defaults to no

@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import {
   drag,
   probe,
+  rightClick,
   screenshot,
   sendKey,
   sendWheel,
@@ -12,10 +13,17 @@ import {
   countExactPixels,
   sleep,
   waitFor,
-  stripAnsi
+  stripAnsi,
+  type Modifier
 } from './bridge'
 import { spawnPty, killPty, pwshPath, windowsBuildNumber, type PtyHandle } from './pty'
-import type { CellProbe, GeometryProbe, LatencySample, ViewportProbe } from '../shared/protocol'
+import type {
+  CellProbe,
+  GeometryProbe,
+  HelperTextareaProbe,
+  LatencySample,
+  ViewportProbe
+} from '../shared/protocol'
 
 const ESC = '\x1b'
 
@@ -456,6 +464,63 @@ const SINK_SCRIPT = `process.stdin.setRawMode(true);process.stdout.write('SINK R
 
 const MULTILINE_PASTE = 'first line\nsecond line\nthird line'
 
+/**
+ * One clipboard-key paste, **counted** rather than matched.
+ *
+ * This was `/\x1b\[200~first line\r/.test(sink.input())`, and that is a test a
+ * doubled stream passes: two complete bracketed envelopes contain a correct
+ * one. It reported green for as long as Ctrl+V pasted twice (ClickUp
+ * 868m0egkt), which is the failure CLAUDE.md names - a check that can pass with
+ * no evidence behind it.
+ *
+ * So three counts, each of which catches the second write on its own:
+ *
+ *  - **pty writes.** One xterm data event is one `pty:input` is one
+ *    `IPty.write`, so `chunks()` counts the keystroke's data events at the
+ *    wire. This is the tight form of the claim and the only one that would
+ *    still hold with bracketed paste off.
+ *  - **bracketed pairs**, opens and closes counted separately, so a truncated
+ *    envelope is a different red line from a duplicated one.
+ *  - **payload bytes**, against `clipboard.length` after xterm's own newline
+ *    normalisation - `prepareTextForTerminal` turns every CRLF or LF into CR,
+ *    which is one byte for one, so the length is the clipboard's.
+ */
+async function pasteByKey(
+  ctx: Ctx,
+  sink: PtyHandle,
+  key: string,
+  modifiers: Modifier[],
+  text: string
+): Promise<{ ok: boolean; detail: Record<string, unknown> }> {
+  clipboard.writeText(text)
+  sink.clearInput()
+  await sendKey(ctx.win, key, modifiers, 900)
+
+  const raw = sink.input()
+  const chunks = sink.chunks()
+  const opens = raw.split(`${ESC}[200~`).length - 1
+  const closes = raw.split(`${ESC}[201~`).length - 1
+  const payloads = [...raw.matchAll(/\x1b\[200~([\s\S]*?)\x1b\[201~/g)].map((m) => m[1] ?? '')
+  const expected = text.replace(/\r?\n/g, '\r')
+  const payloadOk = payloads.length === 1 && payloads[0] === expected
+  const ok = chunks.length === 1 && opens === 1 && closes === 1 && payloadOk
+
+  return {
+    ok,
+    detail: {
+      chord: [...modifiers, key].join('+'),
+      ptyWrites: chunks.length,
+      bracketedOpens: opens,
+      bracketedCloses: closes,
+      payloadBytes: payloads.map((p) => p.length),
+      clipboardBytes: text.length,
+      expectedPayloadBytes: expected.length,
+      payloadMatchesClipboard: payloadOk,
+      writes: chunks.map((c) => JSON.stringify(c.slice(0, 80)))
+    }
+  }
+}
+
 async function checkPaste(ctx: Ctx): Promise<Check> {
   const notes: string[] = []
   const detail: Record<string, unknown> = {}
@@ -511,16 +576,28 @@ async function checkPaste(ctx: Ctx): Promise<Check> {
     notes.push('Multi-line paste was not delivered as a bracketed paste with intact content.')
   }
 
-  // --- the Ctrl+V binding --------------------------------------------------
-  clipboard.writeText(MULTILINE_PASTE)
-  sink.clearInput()
-  await sendKey(ctx.win, 'v', ['control'], 900)
-  const viaKey = sink.input()
-  const keyOk = /\x1b\[200~first line\r/.test(viaKey)
-  detail.ctrlV = { ok: keyOk, raw: JSON.stringify(viaKey.slice(0, 120)) }
-  if (!keyOk) {
-    ok = false
-    notes.push('Ctrl+V did not paste the clipboard through the host binding.')
+  // --- the host's own paste chords -----------------------------------------
+  // Both of them, because Chromium binds a native editing command to each:
+  // Paste for Ctrl+V and PasteAndMatchStyle for Ctrl+Shift+V, and both arrive
+  // at xterm's helper textarea as an ordinary `paste` event that xterm handles
+  // itself. Until `attachKeyBindings` cancelled the keydown, either chord put
+  // the clipboard through twice.
+  const chords: { name: string; key: string; modifiers: Modifier[] }[] = [
+    { name: 'ctrlV', key: 'v', modifiers: ['control'] },
+    { name: 'ctrlShiftV', key: 'v', modifiers: ['control', 'shift'] }
+  ]
+  for (const chord of chords) {
+    const result = await pasteByKey(ctx, sink, chord.key, chord.modifiers, MULTILINE_PASTE)
+    detail[chord.name] = { ok: result.ok, ...result.detail }
+    if (!result.ok) {
+      ok = false
+      const d = result.detail
+      notes.push(
+        `${String(d.chord)} did not deliver exactly one paste: ${String(d.ptyWrites)} pty ` +
+          `write(s), ${String(d.bracketedOpens)} bracketed open(s), payload ` +
+          `${JSON.stringify(d.payloadBytes)} against a ${String(d.clipboardBytes)}-byte clipboard.`
+      )
+    }
   }
 
   // --- bracketed paste OFF -------------------------------------------------
@@ -695,6 +772,28 @@ const SELECT_TEXT = 'SELECTME-0123456789-ABCDEFGHIJ'
 // search below would land on the echo instead of the output.
 const SELECT_CMD = 'Write-Host $("SELECT"+"ME-0123456789-ABCDEFGHIJ")'
 
+/**
+ * A second row, and it is the whole of the stale-copy probe.
+ *
+ * `clipboard.readText() === SELECT_TEXT` is satisfied by whichever writer went
+ * last when there is only one candidate text on screen, so it says nothing
+ * about *which* selection was copied. With two rows the claim becomes "the
+ * clipboard holds the selection that is live now", and the stale one cannot
+ * satisfy it - which is exactly what Chromium's built-in Copy puts there after
+ * a right-click over the pane. Deliberately the same length and the same
+ * character classes as `SELECT_TEXT`, so a wrong answer is a wrong answer and
+ * not a length that happened not to fit.
+ */
+const FRESH_TEXT = 'FRESHPICK-JIHGFEDCBA-987654321'
+const FRESH_CMD = 'Write-Host $("FRESH"+"PICK-JIHGFEDCBA-987654321")'
+
+/** Whether the whole of the helper textarea's value is selected in the DOM. */
+function wholeValueSelected(p: HelperTextareaProbe): boolean {
+  return (
+    p.value !== null && p.value.length > 0 && p.selectionStart === 0 && p.selectionEnd === p.value.length
+  )
+}
+
 async function checkSelection(ctx: Ctx): Promise<Check> {
   const notes: string[] = []
   const shell = spawnPty(ctx.win, {
@@ -706,6 +805,7 @@ async function checkSelection(ctx: Ctx): Promise<Check> {
   })
   await waitForPrompt(shell)
   await runAndSettle(shell, SELECT_CMD, 800)
+  await runAndSettle(shell, FRESH_CMD, 800)
 
   const vp = await probe<ViewportProbe>(ctx.win, { op: 'viewport' })
   const rows = await probe<{ rows: string[] }>(ctx.win, {
@@ -714,23 +814,60 @@ async function checkSelection(ctx: Ctx): Promise<Check> {
     to: vp.viewportY + vp.rows - 1
   })
   const rowOffset = rows.rows.findLastIndex((r) => r.includes(SELECT_TEXT))
+  const freshOffset = rows.rows.findLastIndex((r) => r.includes(FRESH_TEXT))
 
   const geo = await probe<GeometryProbe>(ctx.win, { op: 'geometry' })
-  const y = geo.y + geo.cellHeight * (rowOffset + 0.5)
-  const x0 = geo.x + geo.cellWidth * 0.2
-  const x1 = geo.x + geo.cellWidth * (SELECT_TEXT.length - 0.2)
+  const rowY = (offset: number): number => geo.y + geo.cellHeight * (offset + 0.5)
 
-  // A real drag - the button held for the moves in the middle. Written out by
-  // hand this sent them as `buttons: 0`, which is a hover; xterm's selection
-  // manager tracks moves it started on a press and does not check, so it made
-  // the selection anyway. It works either way, and this is the suite whose
-  // subject is what a real terminal does under a real gesture, so it does the
-  // gesture.
-  await drag(ctx.win, { x: x0, y }, { x: x1, y })
-  await sleep(200)
+  /**
+   * Drag across one row and answer with what xterm ended up holding.
+   *
+   * A real drag - the button held for the moves in the middle. Written out by
+   * hand this sent them as `buttons: 0`, which is a hover; xterm's selection
+   * manager tracks moves it started on a press and does not check, so it made
+   * the selection anyway. It works either way, and this is the suite whose
+   * subject is what a real terminal does under a real gesture, so it does the
+   * gesture.
+   */
+  const selectRow = async (offset: number, length: number): Promise<string> => {
+    const y = rowY(offset)
+    await drag(
+      ctx.win,
+      { x: geo.x + geo.cellWidth * 0.2, y },
+      { x: geo.x + geo.cellWidth * (length - 0.2), y }
+    )
+    await sleep(200)
+    const s = await probe<{ text: string; has: boolean }>(ctx.win, { op: 'selectionText' })
+    return s.text.trim()
+  }
 
-  const sel = await probe<{ text: string; has: boolean }>(ctx.win, { op: 'selectionText' })
-  const dragOk = sel.text.trim() === SELECT_TEXT
+  const rowsFound = rowOffset >= 0 && freshOffset >= 0
+  if (!rowsFound) {
+    notes.push(
+      `Could not find both rows in the viewport (${SELECT_TEXT} at ${rowOffset}, ${FRESH_TEXT} at ${freshOffset}); nothing below is measuring anything.`
+    )
+  }
+
+  const selected = rowsFound ? await selectRow(rowOffset, SELECT_TEXT.length) : ''
+  const dragOk = selected === SELECT_TEXT
+
+  // Ctrl-Shift-C copies and **keeps** the selection; plain Ctrl-C copies and
+  // drops it. That asymmetry is the Windows Terminal contract - the interrupt
+  // has to come back immediately after a copy, and an explicit copy chord has
+  // no reason to disturb what the user selected - and it lives in two lines of
+  // `attachKeyBindings` that look like an oversight next to each other. It was
+  // read rather than measured until now, so a refactor that "tidied" the two
+  // branches into one would have passed every check here. This half is the
+  // keeping one; `interruptRestored` below is the dropping one.
+  clipboard.writeText('')
+  shell.clearInput()
+  await sendKey(ctx.win, 'C', ['control', 'shift'], 500)
+  const shiftCopied = clipboard.readText().trim()
+  const afterShiftCopy = await probe<{ text: string; has: boolean }>(ctx.win, {
+    op: 'selectionText'
+  })
+  const shiftCopyOk = shiftCopied === SELECT_TEXT
+  const selectionKept = afterShiftCopy.has && afterShiftCopy.text.trim() === SELECT_TEXT
 
   // Ctrl-C with a selection must copy, matching Windows Terminal.
   clipboard.writeText('')
@@ -740,15 +877,79 @@ async function checkSelection(ctx: Ctx): Promise<Check> {
   const copyOk = copied === SELECT_TEXT
   const swallowedInterrupt = !shell.input().includes('\x03')
 
-  // ...and with no selection it must interrupt again.
+  // ...and with no selection it must interrupt again. This also empties the
+  // helper textarea, because xterm's own translation of Ctrl-C clears it - so
+  // the probe below starts from a clean one and arms it deliberately.
   shell.clearInput()
   await sendKey(ctx.win, 'c', ['control'], 400)
   const interruptRestored = shell.input().includes('\x03')
 
+  // --- the copy that must not be stale -------------------------------------
+  //
+  // A right-click over the pane is not incidental here, it is the mechanism.
+  // xterm's `rightClickHandler` writes the live selection into the helper
+  // textarea and calls `select()` on it, so from then on there is a real DOM
+  // selection - and Helm's Ctrl-C branch calls `term.clearSelection()`, which
+  // makes xterm's own `copy` listener bow out (`if (!this.hasSelection())
+  // return`) and leaves Chromium's built-in Copy to act on that textarea
+  // unopposed. Its write completes after the IPC write, so it is the last
+  // writer and the clipboard keeps the *old* row. 13/13 before
+  // `attachKeyBindings` cancelled the keydown.
+  const beforeRightClick = rowsFound ? await selectRow(rowOffset, SELECT_TEXT.length) : ''
+  if (rowsFound) {
+    // Past the end of the text, so the 20x20 textarea this parks under the
+    // cursor cannot sit over the columns the next drag crosses.
+    await rightClick(ctx.win, geo.x + geo.cellWidth * (SELECT_TEXT.length + 6), rowY(rowOffset))
+    await sleep(200)
+  }
+  const poisoned = await probe<HelperTextareaProbe>(ctx.win, { op: 'helperTextarea' })
+  const afterFreshDrag = rowsFound ? await selectRow(freshOffset, FRESH_TEXT.length) : ''
+  const stillPoisoned = await probe<HelperTextareaProbe>(ctx.win, { op: 'helperTextarea' })
+
+  // The fixture, asserted before the answer is believed. Without a focused
+  // textarea holding the *first* row's text and holding it selected, Chromium
+  // has nothing to copy, writes nothing, and the assertion below passes
+  // whatever the key handler did - which is the shape CLAUDE.md rules out.
+  const armed =
+    rowsFound &&
+    beforeRightClick === SELECT_TEXT &&
+    (poisoned.value ?? '').trim() === SELECT_TEXT &&
+    wholeValueSelected(poisoned) &&
+    (stillPoisoned.value ?? '').trim() === SELECT_TEXT &&
+    wholeValueSelected(stillPoisoned) &&
+    stillPoisoned.focused &&
+    afterFreshDrag === FRESH_TEXT
+
+  clipboard.writeText('')
+  shell.clearInput()
+  await sendKey(ctx.win, 'c', ['control'], 500)
+  const afterRightClick = clipboard.readText().trim()
+  const freshOk = afterRightClick === FRESH_TEXT
+  // The clipboard is the one thing a check cannot have its own copy of, so put
+  // it back the way C5 does rather than leaving a fixture on the machine's.
+  clipboard.writeText('')
+
   const shot = await screenshot(ctx.win, ctx.shotDir, 'c7-selection.png')
   killPty()
 
-  if (!dragOk) notes.push(`Mouse drag selected ${JSON.stringify(sel.text)} instead of the row text.`)
+  if (!dragOk) notes.push(`Mouse drag selected ${JSON.stringify(selected)} instead of the row text.`)
+  if (!shiftCopyOk) {
+    notes.push(`Ctrl-Shift-C put ${JSON.stringify(shiftCopied)} on the clipboard, not the selection.`)
+  }
+  if (!selectionKept) {
+    notes.push(
+      `Ctrl-Shift-C dropped the selection (${JSON.stringify(afterShiftCopy.text)} left) - only plain Ctrl-C may do that.`
+    )
+  }
+  if (!armed) {
+    notes.push(
+      'The right-click did not leave a live DOM selection in the helper textarea, so the stale-copy probe was not discriminating - treat its result as unmeasured rather than green.'
+    )
+  } else if (!freshOk) {
+    notes.push(
+      `After a right-click, Ctrl-C copied ${JSON.stringify(afterRightClick)} instead of the selection that was live (${FRESH_TEXT}) - the native editing command won the clipboard.`
+    )
+  }
   notes.push(
     'Ctrl-C copies only while a selection is live and reverts to interrupt immediately after, and any other keystroke drops the selection - the Windows Terminal contract.'
   )
@@ -757,12 +958,36 @@ async function checkSelection(ctx: Ctx): Promise<Check> {
     id: 'C7',
     criterion: 'Mouse: text selection + copy',
     title: 'Drag-select, copy, and interrupt coexist',
-    ok: dragOk && copyOk && swallowedInterrupt && interruptRestored,
+    ok:
+      dragOk &&
+      shiftCopyOk &&
+      selectionKept &&
+      copyOk &&
+      swallowedInterrupt &&
+      interruptRestored &&
+      armed &&
+      freshOk,
     detail: {
-      selected: sel.text,
+      selected,
+      shiftCopy: {
+        clipboard: shiftCopied,
+        selectionAfter: afterShiftCopy.text,
+        hasSelectionAfter: afterShiftCopy.has,
+        keptSelection: selectionKept
+      },
       clipboard: copied,
       copyConsumedCtrlC: swallowedInterrupt,
       interruptRestoredAfterCopy: interruptRestored,
+      staleCopy: {
+        selectionAtRightClick: beforeRightClick,
+        helperTextareaAfterRightClick: poisoned,
+        selectionAtCopy: afterFreshDrag,
+        helperTextareaAtCopy: stillPoisoned,
+        probeArmed: armed,
+        clipboard: afterRightClick,
+        expected: FRESH_TEXT,
+        ok: armed && freshOk
+      },
       screenshot: shot.file
     },
     notes
