@@ -1,6 +1,6 @@
 {
   "name": "@helm/desktop",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Helm's Electron shell: main process, preload, renderer.",
   "//productName": "Electron derives app.getName() - and therefore %APPDATA%\\<name> - from this file. Without productName a scoped package name puts the database in %APPDATA%\\@helm/desktop, creating a nested folder from the scope. electron-builder sets the same value for packaged builds.",
   "productName": "Helm",

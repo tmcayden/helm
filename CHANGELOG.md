@@ -14,6 +14,38 @@ A version with no section here does not release: the workflow fails rather than
 publishing an empty body, because the step a person can skip is the step that
 gets skipped.
 
+## 1.2.0
+
+Helm can now run your sessions inside WSL. A profile picks where its Claude
+Code runs - this machine, or a Linux distribution - and everything else about
+Helm stays the same: tabs, the status dot, the sessions view and the browser
+tools all work for a session that lives in Ubuntu.
+
+**A profile chooses Windows or a distribution**
+
+- The profile editor has a target: this machine, or a WSL distribution by name.
+  A WSL profile hosts the distribution's own `claude`, signed in with the
+  distribution's own account, in a folder inside the distribution. Profiles you
+  already have keep running on Windows; nothing about them changed.
+- Skills, commands and agents from a project inside a distribution reach the
+  session exactly as they do for a Windows folder. Where Windows cannot link
+  across the boundary, Helm copies instead, so a session never starts with its
+  skills silently missing.
+- The browser and session tools need WSL's mirrored networking to reach Helm.
+  When they cannot, the session starts without them and the launch says why.
+  Settings gains a WSL group that writes the one line to `.wslconfig` for you,
+  keeping a backup beside it, and offers the WSL restart as a separate step you
+  confirm.
+
+**Folders inside a distribution get the right shell**
+
+- The shell under a project that lives in WSL now opens that distribution's
+  own login shell, in that folder. It used to try PowerShell there and fail.
+  Windows folders keep whatever shell you chose in Settings.
+- Branch and dirty-state chips for a repository inside a distribution now come
+  from the distribution's git. Suggested scan roots include your distributions'
+  home folders.
+
 ## 1.1.1
 
 Pasting into a terminal put your text in twice, and copying could silently hand
