@@ -456,7 +456,7 @@ disk - in which case it owes **the one check that covers it**, narrowed with
 `--only=` wherever that fits; or somebody asked for it.
 
 **A release is not a testing event.** "Cut a release" means bump the version,
-write the changelog section, merge, push. CI runs the fast tier, and
+write the changelog section, merge, push. CI runs `pnpm check`, and
 `verify-artifact.mjs` over both exes on publish. `packaging-check` is for a
 release that **changes packaging** - electron-builder, the native modules,
 `dist-win.mjs`, where files land - and is not owed by one that does not. If a
@@ -475,14 +475,16 @@ has actually been seen. Reproduce the bug, not the mechanism around it.
 They drive the **real window** and most spawn real `claude` sessions, so they
 take minutes and cost tokens. That price buys the one thing nothing else does:
 they are where a bug in the **real stack** is found - Chromium's own editing
-commands, ConPTY, what a native view actually paints - which no unit test can
-reach. So they are a tool for **discovery**, and a gate only for the surfaces
-where only a real window can answer. Regression is the fast tier's job.
+commands, ConPTY, what a native view actually paints - which no test outside a
+real window can reach. So they are a tool for **discovery**, and a gate only for
+the surfaces where only a real window can answer. Catching a regression is the
+job of the unit and integration tests, as in any project.
 
-They are also, for now, the only coverage `packages/ui` and `packages/desktop`
-have - every unit test lives in `packages/core` - and closing that gap is what
-makes the rest of this honest, because "run the fast suite" currently means
-running nothing for most of the app.
+Helm does not have those for `packages/ui` and `packages/desktop` yet - every
+test lives in `packages/core`, so the checks are currently the only coverage
+those two have. That is a gap to close rather than a design, and closing it is
+what makes the rest of this honest: `pnpm check` today runs nothing at all for
+most of the app.
 
 The **`checks`** skill has the table of which one a change owes, what each does,
 and how to narrow a re-run. Two rules belong here rather than there:
