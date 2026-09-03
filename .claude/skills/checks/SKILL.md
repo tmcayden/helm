@@ -334,6 +334,20 @@ fixture's window is set to expire ten seconds out so a rollover happens
 than quoted. Two phases, because "the mode survives a restart" cannot be
 asserted by the process that set it.
 
+Its `homes` group covers the multi-home rule - a machine with WSL has a
+`.claude.json` per distribution as well as its own, and the **freshest reading
+wins with nothing averaged or merged**. It runs through `useHomes` with fixture
+homes rather than through `pointAt`, which is single-candidate by construction,
+and it runs **last** for the same reason `settings-check`'s `wsl` group does:
+`useHomes` appends and there is no removal, so a fixture home reached by an
+earlier group would win a ranking it has no business in. Both directions are
+driven over the same two files - a merged reader and a reader that simply
+preferred the last candidate both pass one direction - and the two percentages
+are chosen so that an average and a sum are distinguishable from either. One
+half is **not** covered and says so in the report: `origin === null`, the value
+when this machine's own file wins, needs a reading in the real `~/.claude.json`,
+which a check may not write.
+
 **`settings-check`** - the settings pane, every app setting, and the terminal
 preferences. The second
 reader is this driver's **own read-only connection to `helm.db`**, opened beside
@@ -365,6 +379,28 @@ each terminal setting on a value of its own on the way past. And a `<select>`
 is checked for having taken the value **before** the change event is dispatched:
 React flushes a discrete event synchronously and re-renders from props the write
 has not come back and changed yet, which puts the old value back.
+
+Its `wsl` group is the other one worth knowing about, because it is the only
+group in the pane that writes **no settings row at all**: what the WSL group
+changes is `%USERPROFILE%\.wslconfig`, a machine-wide file Helm does not own, so
+the second reader is the file itself rather than `helm.db`. It is aimed at a
+fixture profile by swapping **`USERPROFILE`** for the length of the group -
+`wslConfigPath()` resolves that variable at call time, so the real channel, the
+real editor and the real backup all follow it, which is the same posture
+`transcript-check` takes with `CLAUDE_CONFIG_DIR`. That swap is why the group
+runs **last**: on Windows `os.homedir()` *is* `USERPROFILE`, so anything asking
+for a home while it is swapped would be handed the fixture. Four things it
+settles rather than assumes - an absent file must read as *no mode set* and
+never as `nat`; the backup is compared byte for byte against the bytes the
+driver planted, since a copy that exists is not the claim and a copy of *what
+was there* is; the mode line must land inside `[wsl2]` and before the next
+section header, because an editor appending at EOF produces a file that parses
+and that WSL ignores; and a file with two `networkingMode` keys must be refused
+with the reason **on screen**, the click attempted anyway and the bytes shown
+identical afterwards. `wsl --shutdown` is a standing exception of the kind
+`PKG-2` is: the dialog is opened, required to name what it ends, and cancelled,
+and the confirmed path is **not** driven - it would end every WSL process on the
+machine, possibly including the session running the check.
 
 **`transcript-check`** - the transcript archive. The one check that runs against a
 `.claude` tree of its own, pointed at with the real **`CLAUDE_CONFIG_DIR`** rather

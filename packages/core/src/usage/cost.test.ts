@@ -13,7 +13,13 @@ import {
   usageCursor
 } from '../store/usage'
 import { costOfTokens, priceFor, PRICES } from './prices'
-import { parseUsageLine, readUsageTail, scanUsageTranscripts } from './transcripts'
+import {
+  parseUsageLine,
+  readUsageTail,
+  scanUsageTranscripts,
+  usageScanUnits,
+  walkUsageTranscriptsUntil
+} from './transcripts'
 
 /**
  * The dollar half, unit-tested where a driver would be slow: the shapes a
@@ -198,6 +204,52 @@ describe('the usage index', () => {
       true
     )
     expect(scanUsageTranscripts(projects)).toHaveLength(2)
+  })
+
+  /*
+   * The units a bounded scan is split into have to reach as deep as the
+   * one-shot walk, and the test above cannot say whether they do: it exercises
+   * `scanUsageTranscripts`, whose depth arithmetic was never wrong. What was
+   * wrong was the *unit* - `usageScanUnits` gives a project directory `depth: 3`
+   * meaning "three more levels", and the walker read it as "already three deep"
+   * and refused to descend. Every subagent transcript was dropped, the index
+   * came out at 51,270 messages against 135,850, and it called itself caught up.
+   * The whole suite stayed green throughout.
+   */
+  it('reaches subagent transcripts through the units a bounded scan uses', () => {
+    write('s1.jsonl', assistantRow())
+    mkdirSync(join(projects, 'alpha', 's1', 'subagents'), { recursive: true })
+    writeFileSync(join(projects, 'alpha', 's1', 'subagents', 'agent-x.jsonl'), assistantRow())
+
+    const found = usageScanUnits(projects).flatMap(
+      (unit) => walkUsageTranscriptsUntil(unit, Infinity).found
+    )
+    expect(found.map((t) => t.file).sort()).toEqual(
+      scanUsageTranscripts(projects)
+        .map((t) => t.file)
+        .sort()
+    )
+  })
+
+  it('resumes a directory where the deadline stopped it, losing nothing', () => {
+    for (let i = 0; i < 6; i++) write(`s${String(i)}.jsonl`, assistantRow({ uuid: `u${String(i)}` }))
+
+    // A deadline already in the past stops after the first entry of the first
+    // directory, which is the strongest form of interruption there is.
+    const units = usageScanUnits(projects)
+    const seen = new Set<string>()
+    let queue = [...units]
+    let rounds = 0
+    while (queue.length > 0 && rounds < 200) {
+      rounds++
+      const unit = queue.shift()
+      if (unit === undefined) break
+      const step = walkUsageTranscriptsUntil(unit, performance.now())
+      for (const found of step.found) seen.add(found.file)
+      queue = [...step.unfinished, ...queue]
+    }
+
+    expect([...seen].sort()).toEqual(scanUsageTranscripts(projects).map((t) => t.file).sort())
   })
 
   it('reads only what was appended since the cursor', () => {

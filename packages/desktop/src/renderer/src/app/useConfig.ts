@@ -805,10 +805,22 @@ export function useConfig(): ConfigState {
   // -------------------------------------------------------------------------
   // Health
   // -------------------------------------------------------------------------
+  /*
+   * The scope's own path, not `mcpCwd`.
+   *
+   * `mcpCwd` deliberately steps *off* a user scope, because `claude mcp` needs
+   * a project directory to register a server against. The doctor is the
+   * opposite case: a distribution's user scope is precisely where the answer
+   * differs, since `\\wsl$\<distro>\home\...` is what tells the launcher to run
+   * that distribution's CLI. So the health panel asks about the scope on
+   * screen, whatever kind it is.
+   */
+  const doctorCwd = scope?.path ?? ''
+
   const runDoctor = useCallback(() => {
     setDoctorRunning(true)
     void helm
-      .invoke('config:doctor')
+      .invoke('config:doctor', { cwd: doctorCwd })
       .then(setDoctor)
       .catch((err: unknown) =>
         setDoctor({
@@ -821,7 +833,7 @@ export function useConfig(): ConfigState {
         })
       )
       .finally(() => setDoctorRunning(false))
-  }, [])
+  }, [doctorCwd])
 
   return {
     scopes,

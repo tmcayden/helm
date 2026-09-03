@@ -26,6 +26,8 @@ import { applyTitleBarOverlay } from './chrome'
 import type { PtermHost } from './pterm'
 import { readClaudeVersion, setClaudeOverride } from './claude-cli'
 import { setGhOverride } from './gh-cli'
+import { describeWslDistro, forgetWslProbes, listWslDistros, wslHomes } from './wsl'
+import { readWslNetworking, setWslNetworking, shutdownWsl } from './wslconfig'
 import { readClaudeStatus, verifyClaudeAt } from './setup'
 import { checkForUpdate, RELEASES_PAGE } from './update'
 import { appMode, dataDir, dbFile, templatesDir } from './paths'
@@ -267,9 +269,12 @@ export function registerIpc(ctx: IpcContext): void {
       }
     },
 
-    'roots:suggest': () => suggestRoots(),
+    // The distro homes come from the host's memoised probe: `core/` never
+    // spawns, so a suggestion inside a distro exists only if it is handed one.
+    'roots:suggest': async () => suggestRoots(process.cwd(), await wslHomes()),
 
-    'roots:add': async () => {
+    'roots:add': async (request) => {
+      const startIn = request?.startIn
       const title = 'Add a folder to scan'
       if (ctx.chooseDirectory) {
         const picked = ctx.chooseDirectory(title)
@@ -278,7 +283,8 @@ export function registerIpc(ctx: IpcContext): void {
       const win = ctx.window()
       const options: Electron.OpenDialogOptions = {
         title,
-        properties: ['openDirectory', 'multiSelections']
+        properties: ['openDirectory', 'multiSelections'],
+        ...(startIn !== undefined && startIn !== '' ? { defaultPath: startIn } : {})
       }
       const result = win
         ? await dialog.showOpenDialog(win, options)
@@ -360,12 +366,67 @@ export function registerIpc(ctx: IpcContext): void {
       return next
     },
 
-    'path:chooseDirectory': async ({ title }) => {
+    /*
+     * The listing is cheap and the probe is not, which is why they are two
+     * channels rather than one.
+     *
+     * `wsl.exe -l -v` is one process and touches no distribution. Asking a
+     * distro about its `claude` **starts** it if it is stopped, so a form that
+     * probed everything on open would boot every distribution on the machine
+     * to populate a dropdown.
+     */
+    'wsl:distros': () => listWslDistros(),
+
+    'wsl:homes': async () => [...(await wslHomes())],
+
+    'wsl:probe': async ({ distro, refresh }) => {
+      // `refresh` is for the one case the memo is wrong about: the user has
+      // just been told to change `.wslconfig` and wants to be asked again
+      // without restarting Helm.
+      if (refresh === true) forgetWslProbes()
+      return describeWslDistro(distro, ctx.browserMcp?.address()?.port ?? null)
+    },
+
+    'wsl:networking': () => readWslNetworking(),
+
+    'wsl:setNetworking': async ({ mode }) => {
+      const result = setWslNetworking(mode)
+      if (result.ok && !result.unchanged) {
+        // The probes memoise "can this distro reach the endpoint", which is
+        // exactly the answer this write is about - so a user who has just fixed
+        // their configuration is asked again rather than having to restart Helm
+        // to see it take. Both caches, because `wslHomes` is memoised behind
+        // the same probes and a distro whose home was unreadable is one this
+        // may have just made reachable.
+        forgetWslProbes()
+        await ctx.config.refreshWslHomes()
+      }
+      return result
+    },
+
+    /*
+     * Ends every WSL process on this machine, and is called from exactly one
+     * place: a confirmation in the settings pane that says so.
+     *
+     * Deliberately not folded into `wsl:setNetworking`. The write is safe and
+     * this is not - it takes down other people's editors, servers and builds
+     * inside any distribution, and any Claude Code session running in one,
+     * including sessions this Helm is hosting on a WSL target. A setting that
+     * quietly did this would be the one irreversible thing on the pane.
+     */
+    'wsl:shutdown': () => shutdownWsl(),
+
+    'path:chooseDirectory': async ({ title, startIn }) => {
       if (ctx.chooseDirectory) return { path: ctx.chooseDirectory(title ?? 'Choose a folder') }
       const win = ctx.window()
       const options: Electron.OpenDialogOptions = {
         title: title ?? 'Choose a folder',
-        properties: ['openDirectory', 'createDirectory']
+        properties: ['openDirectory', 'createDirectory'],
+        // Only when asked for. An unset `defaultPath` leaves the dialog wherever
+        // Windows last left it, which is what somebody choosing a Windows folder
+        // wants; overriding that for everyone to serve the WSL case would be
+        // taking one user's shortcut out of another's pocket.
+        ...(startIn !== undefined && startIn !== '' ? { defaultPath: startIn } : {})
       }
       const result = win
         ? await dialog.showOpenDialog(win, options)
@@ -407,6 +468,28 @@ export function registerIpc(ctx: IpcContext): void {
           ? { template: request.template }
           : {})
       })
+      /*
+       * A folder that is already a harness is not a failure to report and walk
+       * away from - the thing the user asked for exists, and what they actually
+       * want is to see it. So the root goes in exactly as it would have on a
+       * successful conversion, and the reply carries the path so the dialog can
+       * say "it is already one, and it is listed now" instead of refusing.
+       *
+       * Found in use on 2026-09-03, and WSL is why it was found: a harness
+       * inside a distribution is never covered by a scan root, because every
+       * root is a Windows path and nothing adds a `\\wsl$\` one. The user
+       * converted `\\wsl$\Ubuntu\home\<user>\harness`, was told it was already a
+       * harness, and then could not find it anywhere in the launcher - which
+       * reads as the app contradicting itself, and is the same dead end for any
+       * existing harness outside the roots.
+       */
+      if (result.path === null && result.existing !== null) {
+        const covered = services.settings.scanRoots.some((root) =>
+          isWithin(root, result.existing as string)
+        )
+        const roots = covered ? services.settings.scanRoots : addRoots([result.existing])
+        return { ...result, roots }
+      }
       if (result.path === null) {
         return { ...result, roots: services.settings.scanRoots }
       }
@@ -557,7 +640,7 @@ export function registerIpc(ctx: IpcContext): void {
     'config:mcpApprove': (request) => ctx.config.mcpApprove(request),
     'config:mcpList': ({ cwd }) => ctx.config.mcpList(cwd),
 
-    'config:doctor': () => ctx.config.doctor(),
+    'config:doctor': ({ cwd }) => ctx.config.doctor(cwd),
 
     // The last reading rather than a fresh read: the service keeps itself
     // current, and a status bar that hit the disk every time it repainted

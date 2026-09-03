@@ -1,5 +1,10 @@
 import type { BrowserWindow } from 'electron'
-import { sessionResources, type ProcessSnapshot, type SessionResources } from '@helm/core'
+import {
+  noProcessSnapshot,
+  sessionResources,
+  type ProcessSnapshot,
+  type SessionResources
+} from '@helm/core'
 import { emit } from './ipc'
 import { readProcessSnapshot } from './processes'
 import type { SessionHost } from './sessions'
@@ -54,6 +59,37 @@ import type { SessionHost } from './sessions'
  * tree of a session Helm did not spawn is not something this can produce or
  * would try to - which is why the pane's detail half is Helm's own and its
  * listing half is machine-wide.
+ *
+ * ## A WSL-hosted session is a session this pass cannot see
+ *
+ * `readProcessSnapshot` is two CIM queries against **this** kernel. For a
+ * session hosted in a distro the pty is `wsl.exe`, and everything the session
+ * actually started - the `claude` process itself, its Bash children, its dev
+ * server - is a Linux process in another kernel with pids from another number
+ * space. Rooting the walk at the pty therefore does not fail: it *succeeds*,
+ * finds `wsl.exe` alive with no Windows children, and produces a tree that says
+ * the session is holding nothing. That is the one answer the shape of
+ * `SessionResources` exists to prevent, and CLAUDE.md names the reason: "could
+ * not look" and "nothing there" are never merged, because "holding nothing" is
+ * what somebody checks before starting a second agent. Getting it wrong by
+ * enumerating the wrong kernel is worse than getting it wrong by not asking,
+ * since the wrong answer here is the reassuring one.
+ *
+ * So a WSL-hosted session gets the same record a host that could not be asked
+ * gets - `processes` and `ports` null, `rootSeen` false - and the pane paints
+ * "Unknown". The ports go with the tree rather than being kept: a listener
+ * inside a distro reaches Windows through WSL's own relay, which holds the
+ * socket under a pid that is not in this session's tree at all, so the socket
+ * query answering perfectly still cannot attribute anything to this session.
+ * Every port the pass could honestly credit it with is therefore not a port
+ * this session may be said to hold.
+ *
+ * **The fix is to not claim an answer, never to go and get one.** Asking the
+ * distro would mean a `wsl.exe` per distro per pass, on top of the 400-480ms
+ * budget above, on a 4s timer - which would invert the whole of that budget for
+ * the one kind of session it is hardest to justify spending it on. If a tree
+ * inside a distro is ever wanted it is a different mechanism with its own
+ * budget, not another child process hung off this one.
  */
 const POLL_MS = 4_000
 
@@ -140,7 +176,14 @@ export function createResourcesService({
       .filter((record) => record.status === 'running')
       .flatMap((record) => {
         const pid = sessions.pid(record.id)
-        return pid === null ? [] : [{ id: record.id, pid }]
+        if (pid === null) return []
+        // Where this session is hosted decides whether the enumeration below is
+        // an answer about it at all - see the header. Null target is a session
+        // this process is not hosting, which cannot happen for a row `list()`
+        // returned and is treated as Windows because that is the state every
+        // session had before distros existed.
+        const wsl = sessions.target(record.id)?.kind === 'wsl'
+        return [{ id: record.id, pid, wsl }]
       })
 
     if (live.length === 0) {
@@ -168,7 +211,17 @@ export function createResourcesService({
       ports: snapshot.ports?.length ?? -1
     }
 
-    const next = live.map(({ id, pid }) => sessionResources(id, pid, snapshot))
+    // A WSL-hosted session is handed the empty snapshot rather than this one,
+    // so it takes the "could not look" branch of `sessionResources` by the same
+    // route a machine that refused the query takes it. Built from the pass's
+    // own `atMs` because the pass did run and this is when Helm last looked;
+    // reusing the core function rather than writing the record inline keeps
+    // "could not look" one shape with one definition, so a later field cannot
+    // be filled here and left null there.
+    const unasked = noProcessSnapshot(snapshot.atMs, snapshot.durationMs)
+    const next = live.map(({ id, pid, wsl }) =>
+      sessionResources(id, pid, wsl ? unasked : snapshot)
+    )
     if (signature(next) === signature(current)) {
       // The tree has not moved. `current` is still replaced, so `atMs` is the
       // time of the pass that most recently confirmed it rather than the time

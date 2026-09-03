@@ -78,8 +78,13 @@ export {
   type TerminalSettings,
   type UpdateCheckResult,
   type UpdateOutcome,
-  type UpdateOutcomeState
+  type UpdateOutcomeState,
+  type WslSettingsState
 } from './components/SettingsPane'
+export {
+  WslShutdownDialog,
+  type WslShutdownDialogProps
+} from './components/WslShutdownDialog'
 export { VersionBanner, type VersionBannerProps } from './components/VersionBanner'
 export { GitChip, type GitChipProps } from './components/GitChip'
 export { InventoryChips, type InventoryChipsProps } from './components/InventoryChips'

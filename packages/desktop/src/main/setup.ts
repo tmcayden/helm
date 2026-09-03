@@ -8,6 +8,8 @@ import {
   readClaudeVersion,
   resolveClaudeCommand
 } from './claude-cli'
+import { describeWslDistro, wslHomes } from './wsl'
+import type { WslHome } from '@helm/core'
 import type { ClaudeStatus, ClaudeAuth } from '../shared/ipc'
 
 /**
@@ -106,39 +108,90 @@ export function claudeConfigDir(): string {
  *      login that lives somewhere this cannot see - a keychain, a credential
  *      helper - still leaves those behind.
  *
- * When the config directory is not there at all the answer is "no" without
- * reading anything. When it is there and none of the three fired, the answer is
- * "no" on Windows and "cannot tell" elsewhere, because on macOS and Linux the
- * credential legitimately lives in a store this has no business opening.
+ * Signals two and three are then asked **again, once per WSL distribution**,
+ * over that distribution's own `~/.claude`. A session hosted in a distro runs
+ * that distro's CLI against that distro's tree, so a login there is a login -
+ * and until this was asked, somebody whose whole Claude Code install lives in
+ * Ubuntu was told they were not signed in beside a launcher that would have
+ * worked. It runs second and can only turn a "no" into a "yes", so nothing
+ * about the answer for a Windows user moved, and the signal names the distro
+ * rather than implying something about this machine.
+ *
+ * When none of them fired the answer is "no" on Windows and "cannot tell"
+ * elsewhere, because on macOS and Linux the credential legitimately lives in a
+ * store this has no business opening. A missing config directory is reported as
+ * itself, since naming the directory is more use than "no credentials found".
  */
 export async function readAuth(
-  configDir: string
+  configDir: string,
+  distros: readonly WslHome[] = []
 ): Promise<{ auth: ClaudeAuth; signal: string }> {
   if ((process.env['ANTHROPIC_API_KEY'] ?? '').trim() !== '') {
     return { auth: 'authenticated', signal: 'ANTHROPIC_API_KEY is set' }
   }
+
+  /** Signals two and three, over one `.claude` directory. */
+  const signedInAt = async (dir: string): Promise<'credentials' | 'onboarding' | null> => {
+    if (fileWithBytes(join(dir, '.credentials.json'))) return 'credentials'
+    // Beside the directory, not inside it: the CLI keeps `.claude/` and
+    // `.claude.json` as siblings, and moving the directory moves both.
+    try {
+      const parsed: unknown = JSON.parse(await readFile(join(dirname(dir), '.claude.json'), 'utf8'))
+      if (parsed !== null && typeof parsed === 'object') {
+        const record = parsed as Record<string, unknown>
+        if (record['hasCompletedOnboarding'] === true && typeof record['userID'] === 'string') {
+          return 'onboarding'
+        }
+      }
+    } catch {
+      // Absent or unreadable is not an error here - it is one signal of three.
+    }
+    return null
+  }
+
+  if (directoryExists(configDir)) {
+    const here = await signedInAt(configDir)
+    if (here === 'credentials') {
+      return { auth: 'authenticated', signal: '.credentials.json is present' }
+    }
+    if (here === 'onboarding') {
+      return { auth: 'authenticated', signal: '.claude.json records a completed sign-in' }
+    }
+  }
+
+  /*
+   * The distributions, asked only once this machine has said no.
+   *
+   * A sign-in inside WSL is a sign-in: the CLI that a session actually runs is
+   * that distro's, reading that distro's `~/.claude`, and none of it is here.
+   * Before this, somebody whose entire Claude Code install lives in Ubuntu -
+   * which is the ordinary shape when the toolchain does - opened Helm and was
+   * told they were not signed in, next to a launcher that would have worked.
+   *
+   * Second, not first, so nothing about the answer for a Windows user changes:
+   * this can only ever turn a "no" into a "yes", and it names the distro so the
+   * pane is not claiming something about this machine that is not true.
+   *
+   * The credential rule is unchanged and is why this is only ever three
+   * existence questions. `.credentials.json` is checked for, never opened, in
+   * a distro exactly as here.
+   */
+  for (const distro of distros) {
+    if (!directoryExists(distro.claudeHome)) continue
+    const found = await signedInAt(distro.claudeHome)
+    if (found === null) continue
+    return {
+      auth: 'authenticated',
+      signal:
+        found === 'credentials'
+          ? `.credentials.json is present in ${distro.distro}`
+          : `${distro.distro}'s .claude.json records a completed sign-in`
+    }
+  }
+
   if (!directoryExists(configDir)) {
     return { auth: 'unauthenticated', signal: `${configDir} does not exist` }
   }
-  if (fileWithBytes(join(configDir, '.credentials.json'))) {
-    return { auth: 'authenticated', signal: '.credentials.json is present' }
-  }
-
-  // Beside the directory, not inside it: the CLI keeps `.claude/` and
-  // `.claude.json` as siblings, and moving the directory moves both.
-  const settingsFile = join(dirname(configDir), '.claude.json')
-  try {
-    const parsed: unknown = JSON.parse(await readFile(settingsFile, 'utf8'))
-    if (parsed !== null && typeof parsed === 'object') {
-      const record = parsed as Record<string, unknown>
-      if (record['hasCompletedOnboarding'] === true && typeof record['userID'] === 'string') {
-        return { auth: 'authenticated', signal: '.claude.json records a completed sign-in' }
-      }
-    }
-  } catch {
-    // Absent or unreadable is not an error here - it is one signal of three.
-  }
-
   return process.platform === 'win32'
     ? { auth: 'unauthenticated', signal: 'no credentials found' }
     : { auth: 'unknown', signal: 'credentials may live outside the config directory' }
@@ -175,16 +228,47 @@ export async function readClaudeStatus(options: SetupOptions = {}): Promise<Clau
     if (path !== null) source = 'discovered'
   }
 
+  /*
+   * The distributions, asked only when this is the real machine.
+   *
+   * `options.configDir` is passed by the check drivers to point this at a
+   * fixture tree, and a check that reached into the developer's real
+   * distributions would be reporting on an installation it was never aimed at.
+   */
+  const distros = options.configDir === undefined ? await wslHomes() : []
+
   let version: string | null = null
   if (path === null) {
-    error ??= 'claude was not found on PATH or in the usual install directory.'
+    /*
+     * "Not found" is a different sentence when it is only not found *here*.
+     *
+     * A machine whose Claude Code lives inside a distribution is the ordinary
+     * shape once the toolchain does, and the old wording told that user their
+     * install was missing while the launcher would have run their sessions
+     * perfectly. This says which distribution has one, so the sentence matches
+     * what Helm can actually do.
+     *
+     * The Windows CLI is still reported as absent rather than papered over: it
+     * is what a Windows-target profile needs, and `path` staying null is what
+     * keeps the pane's own "locate it" affordance on screen.
+     */
+    const withClaude: string[] = []
+    for (const distro of distros) {
+      const probe = await describeWslDistro(distro.distro, null)
+      if (probe.claudePath !== null) withClaude.push(distro.distro)
+    }
+    error ??=
+      withClaude.length === 0
+        ? 'claude was not found on PATH or in the usual install directory.'
+        : `claude was not found on this machine, but ${withClaude.join(', ')} has one - ` +
+          'a profile whose root is inside that distribution, or one set to run there, will use it.'
   } else {
     version = await readClaudeVersion(path)
     if (version === null) error ??= `${path} did not answer \`claude --version\`.`
   }
 
   const semverParts = version === null ? null : parseSemver(version)
-  const { auth, signal } = await readAuth(configDir)
+  const { auth, signal } = await readAuth(configDir, distros)
 
   return {
     path,

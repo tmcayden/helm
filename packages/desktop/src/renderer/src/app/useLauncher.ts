@@ -30,7 +30,8 @@ export interface LauncherState {
   selected: Project | null
   select: (project: Project | null) => void
   rescan: () => void
-  addRoot: () => void
+  /** Opens the folder picker. `startIn` opens it inside a distribution. */
+  addRoot: (startIn?: string) => void
   removeRoot: (path: string) => void
   setTheme: (theme: ThemePreference) => void
   setUsageDisplay: (mode: UsageDisplayMode) => void
@@ -168,8 +169,8 @@ export function useLauncher(): LauncherState {
       .finally(() => setScanning(false))
   }, [])
 
-  const addRoot = useCallback(() => {
-    void helm.invoke('roots:add').then((roots) => {
+  const addRoot = useCallback((startIn?: string) => {
+    void helm.invoke('roots:add', startIn === undefined ? {} : { startIn }).then((roots) => {
       setSettings((current) => (current ? { ...current, scanRoots: roots } : current))
       rescan()
     })

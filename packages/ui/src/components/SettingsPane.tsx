@@ -28,7 +28,11 @@ import {
   type PullRepo,
   type TerminalCursorStyle,
   type ThemePreference,
-  type UsageDisplayMode
+  type UsageDisplayMode,
+  type WslDistro,
+  type WslNetworkingMode,
+  type WslNetworkingState,
+  type WslProbe
 } from '@helm/core/types'
 import { cn } from '../lib/cn'
 import { SEGMENT_ON } from '../lib/segmented'
@@ -37,6 +41,7 @@ import { Checkbox } from './Checkbox'
 import { CaretIcon, CheckIcon, CloseIcon, RefreshIcon, WarnIcon } from './icons'
 import type { SetupClaudeStatus } from './SetupPane'
 import { ThemeToggle } from './ThemeToggle'
+import { WslShutdownDialog } from './WslShutdownDialog'
 
 /**
  * Helm's own settings.
@@ -83,6 +88,16 @@ export interface SettingsPaneProps {
   scanning: boolean
   onAddRoot: () => void
   onRemoveRoot: (path: string) => void
+  /**
+   * Folders Helm found that are not roots yet, and accepting one.
+   *
+   * The same list first run offers, surfaced where somebody past first run can
+   * still act on it - which is the whole point: a distribution installed later,
+   * or a harness made inside one, becomes suggestible long after the only pane
+   * that showed suggestions has gone for good.
+   */
+  suggestedRoots?: readonly string[] | undefined
+  onAcceptRoot?: ((path: string) => void) | undefined
 
   /**
    * `pinnedProjects`, as stored: absolute paths, in the order the setting holds
@@ -207,6 +222,25 @@ export interface SettingsPaneProps {
   onSessionMcpChange: (next: boolean) => void
 
   /**
+   * WSL: what `%USERPROFILE%\.wslconfig` says, and what the distros answer.
+   *
+   * One object rather than eight props, the same shape `terminal` takes: these
+   * are all readings of one machine-wide fact, and a caller that could pass
+   * half of them is a caller that can show a mode with no file behind it.
+   */
+  wsl: WslSettingsState
+  /** Writes `networkingMode` under `[wsl2]`. Never restarts WSL. */
+  onWslNetworkingModeChange: (mode: WslNetworkingMode) => void
+  /** Asks one distro whether it can reach the endpoint, starting it if need be. */
+  onWslProbe: (distro: string) => void
+  /**
+   * `wsl --shutdown`. Called only after this pane's own confirmation, which is
+   * why the prop is not named `onRestartWsl`: the button the user sees opens a
+   * dialog, and only its accepting half reaches here.
+   */
+  onWslShutdown: () => void
+
+  /**
    * What Helm found out about `gh`, out of the pull-request snapshot. Null
    * until the first pass has resolved it.
    */
@@ -267,6 +301,43 @@ export interface UpdateCheckResult {
   newer: boolean
   error: string | null
   checkedAt: string
+}
+
+/**
+ * Everything the WSL group paints, in one object.
+ *
+ * The two halves are held separately on purpose, and that is the whole design
+ * of this group: `networking` is what a file on this machine *says*, and
+ * `probes` is whether a distribution can *actually* open a socket to Helm's
+ * endpoint right now. A `.wslconfig` reading `mirrored` while WSL has not
+ * restarted yet is exactly the state a user needs to see, so nothing here
+ * merges them into one verdict - the same rule the usage figures and the config
+ * console's live state follow, one surface further out.
+ */
+export interface WslSettingsState {
+  /** The file's reading. Null until the first read lands. */
+  networking: WslNetworkingState | null
+  /** The distributions on this machine, from the cheap listing. */
+  distros: readonly WslDistro[]
+  /**
+   * Probe answers by distro name, for the ones somebody has asked about.
+   *
+   * Keyed rather than a single "last probe", because the answer belongs to the
+   * distro it was asked of - and a user checking a second distro must not see
+   * the first one's answer relabelled.
+   */
+  probes: Readonly<Record<string, WslProbe>>
+  /** The distro being asked about, if any. Its answer is ~200ms-2s away. */
+  probing: string | null
+  /** A write is in flight, so the buttons are held. */
+  busy: boolean
+  /**
+   * What the last write did, as a sentence - including where the copy of the
+   * previous file went. Null before anything has been written.
+   */
+  notice: string | null
+  /** Why the last attempt did nothing. Null when the last one worked. */
+  error: string | null
 }
 
 /** One tickable repository in the GitHub group's list. */
@@ -365,6 +436,8 @@ export function SettingsPane({
   scanning,
   onAddRoot,
   onRemoveRoot,
+  suggestedRoots = [],
+  onAcceptRoot = () => undefined,
   pinnedProjects,
   onUnpinProject,
   theme,
@@ -404,6 +477,10 @@ export function SettingsPane({
   onBrowserMcpLocalOnlyChange,
   sessionMcp,
   onSessionMcpChange,
+  wsl,
+  onWslNetworkingModeChange,
+  onWslProbe,
+  onWslShutdown,
   gh,
   onLocateGh,
   onClearGhOverride,
@@ -559,6 +636,49 @@ export function SettingsPane({
             folder here only stops Helm scanning it; nothing on disk is touched.
           </p>
 
+          {/* Folders Helm can see are worth scanning but is not scanning.
+              Offered here as well as on first run, because the answer changes
+              *after* first run and the pane was the only place it was ever
+              shown: install WSL, or make a harness inside a distribution, and
+              the suggestion becomes true for somebody who will never see that
+              pane again. A distro's harness is the case that made this obvious
+              - no scan root ever covers `\\wsl$\...`, so a harness in there is
+              invisible until somebody adds it by hand, and nothing in the app
+              said it was there. */}
+          {suggestedRoots.length > 0 && (
+            <div className="mt-3" data-settings-suggested>
+              <p className="text-[12.5px] text-fg">Not scanned yet</p>
+              <p className="mt-0.5 mb-2 text-[11px] leading-[1.55] text-fg-subtle">
+                Helm found these and is not looking at them.
+              </p>
+              <ul className="overflow-hidden rounded-well border border-border bg-surface-sunken">
+                {suggestedRoots.map((suggestion) => (
+                  <li
+                    key={suggestion}
+                    data-settings-suggested-root={suggestion}
+                    className="flex items-center gap-2 border-b border-border px-3 py-1.5 last:border-b-0"
+                  >
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-muted"
+                      title={suggestion}
+                    >
+                      {suggestion}
+                    </span>
+                    <button
+                      type="button"
+                      data-settings-accept-root={suggestion}
+                      onClick={() => onAcceptRoot(suggestion)}
+                      title={`Scan ${suggestion}`}
+                      className="shrink-0 rounded-well border border-border-strong px-2 py-0.5 text-[11px] text-fg transition-colors hover:bg-hover"
+                    >
+                      Scan it
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <Actions>
             <Action data-settings-add-root onClick={onAddRoot} primary={roots.length === 0}>
               Add a folder
@@ -699,6 +819,16 @@ export function SettingsPane({
         />
 
         <SessionsGroup mcp={sessionMcp} onMcpChange={onSessionMcpChange} />
+
+        {/* Beside Browser and Sessions rather than further down, because the
+            thing it changes is whether those two families of tools reach a
+            session hosted in a distro at all. */}
+        <WslGroup
+          wsl={wsl}
+          onModeChange={onWslNetworkingModeChange}
+          onProbe={onWslProbe}
+          onShutdown={onWslShutdown}
+        />
 
         <UpdatesGroup
           appVersion={appVersion}
@@ -1217,6 +1347,236 @@ function SessionsGroup({
       </Row>
     </Group>
   )
+}
+
+/**
+ * WSL: the one machine-wide change Helm offers, and the two questions it is
+ * about.
+ *
+ * Why the group exists at all. Measured 2026-09-02 (SPEC 4.8): a WSL2 distro on
+ * the default NAT networking mode cannot reach Helm's loopback endpoint - not
+ * on `127.0.0.1`, which only mirrors under `networkingMode=mirrored`, and not
+ * on the gateway, because the endpoint binds loopback only and that rule is not
+ * being loosened. So a session hosted in a distro launches with no tools and
+ * Helm prints a sentence naming the fix. This is that sentence with a button on
+ * it.
+ *
+ * Three decisions, and each is the reason a different simpler version is wrong.
+ *
+ * **It is here and not on a profile.** `networkingMode` lives in one file in
+ * the user's profile directory and governs every distribution and every WSL
+ * process on the machine. A per-profile control would say the scope was a
+ * profile's, and somebody would set it on one and wonder why the other changed.
+ * It is not an install step either: writing a file Helm does not own before the
+ * user has any context for it is the opposite of the posture SPEC 7 pins.
+ *
+ * **The file's mode and the endpoint's reachability are two facts, never one
+ * verdict.** The file says what it says; whether a distro can open a socket is
+ * a connect, and the state between them - `mirrored` written, WSL not restarted
+ * - is the state a user is most likely to be in while wondering why nothing
+ * changed. One merged verdict would be a green tick over a session that still
+ * has no tools.
+ *
+ * **The probe is on a button.** Asking a distribution anything *starts* it, so
+ * a group that probed on open would boot every distribution on the machine to
+ * paint a settings pane - the same reason `wsl:distros` and `wsl:probe` are two
+ * channels.
+ */
+function WslGroup({
+  wsl,
+  onModeChange,
+  onProbe,
+  onShutdown
+}: {
+  wsl: WslSettingsState
+  onModeChange: (mode: WslNetworkingMode) => void
+  onProbe: (distro: string) => void
+  onShutdown: () => void
+}): JSX.Element {
+  const [asking, setAsking] = useState(false)
+  const [picked, setPicked] = useState('')
+
+  const { networking } = wsl
+  const mode = networking?.networkingMode ?? null
+  const mirrored = mode !== null && mode.toLowerCase() === 'mirrored'
+  const refused = networking !== null && networking.refusal !== null
+  // The default distribution is what `wsl.exe` would use with no `-d`, so it is
+  // what somebody means by "my distro" until they say otherwise.
+  const fallback = wsl.distros.find((distro) => distro.isDefault) ?? wsl.distros[0]
+  const chosen = picked !== '' ? picked : (fallback?.name ?? '')
+  const probe = chosen === '' ? undefined : wsl.probes[chosen]
+
+  return (
+    <Group
+      name="wsl"
+      title="WSL"
+      hint="A profile can host its sessions inside a WSL distribution. Helm’s browser and session tools reach one only where WSL shares this machine’s loopback, which it does not do by default - so this is the group for the one file that changes that."
+    >
+      <div className="pb-1">
+        <Verdict
+          tone={networking === null ? 'todo' : refused ? 'warn' : mirrored ? 'ok' : 'todo'}
+          text={verdictText(networking, mirrored)}
+          data-settings-wsl-state={
+            networking === null
+              ? 'reading'
+              : refused
+                ? 'refused'
+                : mirrored
+                  ? 'mirrored'
+                  : 'not-mirrored'
+          }
+        />
+        <dl className="mt-2.5 space-y-1.5">
+          <Fact label="File">
+            <span data-settings-wsl-file title={networking?.path ?? ''}>
+              {networking?.path ?? NOTHING}
+            </span>
+          </Fact>
+          <Fact label="Mode">
+            {/* The value verbatim, and `-` for a file that sets none - never
+                "nat". Which mode WSL defaults to is a fact about the WSL build
+                rather than about this file, and printing the default as though
+                the file said it would be Helm inventing a line nobody wrote. */}
+            <span data-settings-wsl-mode={mode ?? ''}>{mode ?? NOTHING}</span>
+          </Fact>
+        </dl>
+      </div>
+
+      <Divider />
+
+      <Row
+        label="Mirrored networking"
+        hint={
+          mirrored
+            ? 'Set in the file. Every distribution shares this machine’s loopback from the next time WSL starts, and Helm’s tools reach a session hosted in one.'
+            : 'Not set, so WSL runs its default NAT stack and nothing inside a distribution can reach Helm’s endpoint on 127.0.0.1.'
+        }
+      >
+        <Action
+          data-settings-wsl-set={mirrored ? 'nat' : 'mirrored'}
+          primary={!mirrored}
+          disabled={wsl.busy || networking === null || refused}
+          onClick={() => onModeChange(mirrored ? 'nat' : 'mirrored')}
+        >
+          {mirrored ? 'Set back to nat' : 'Turn on mirrored networking'}
+        </Action>
+      </Row>
+
+      {/* The launch-disclosure rule (DESIGN.md par. 5) applied to a write
+          rather than to a process: the file, the key and the copy are named on
+          screen before the button is pressed, machine parts in mono. What must
+          be legible here is the scope - this is not a Helm setting, it is a
+          change to the machine - and that Helm stops short of restarting WSL. */}
+      <p className="mt-1 text-[11px] leading-[1.55] text-fg-subtle">
+        Sets <code className="font-mono">networkingMode</code> under{' '}
+        <code className="font-mono">[wsl2]</code> in your own{' '}
+        <code className="font-mono">.wslconfig</code>, keeping everything else in it and copying the
+        file to a <code className="font-mono">.helm.bak</code> beside itself first. It is
+        machine-wide: every distribution and every WSL process, not just Helm’s. Helm does not
+        restart WSL, so the change applies the next time WSL starts.
+      </p>
+
+      {wsl.notice !== null && (
+        <p data-settings-wsl-notice className="mt-1.5 font-mono text-[11px] text-fg-muted">
+          {wsl.notice}
+        </p>
+      )}
+      {wsl.error !== null && (
+        <p data-settings-wsl-error className="mt-1.5 text-[11.5px] leading-[1.5] text-danger">
+          {wsl.error}
+        </p>
+      )}
+
+      <Divider />
+
+      <Row
+        label="Can a distribution reach Helm?"
+        hint="Measured by opening a socket from inside the distribution, which starts it if it is stopped - so it is asked when you press this and never when this pane opens. This is the question the file above does not answer: until WSL restarts, a file saying mirrored and a distro that cannot connect are both true."
+      >
+        <div className="flex items-center gap-2">
+          <Select
+            value={chosen}
+            label="Distribution to check"
+            data-settings-wsl-distro={chosen}
+            onChange={setPicked}
+          >
+            {wsl.distros.length === 0 && <option value="">No distributions</option>}
+            {wsl.distros.map((distro) => (
+              <option key={distro.name} value={distro.name}>
+                {distro.name}
+              </option>
+            ))}
+          </Select>
+          <Action
+            data-settings-wsl-check
+            disabled={chosen === '' || wsl.probing !== null}
+            onClick={() => onProbe(chosen)}
+          >
+            {wsl.probing === chosen ? 'Checking…' : 'Check'}
+          </Action>
+        </div>
+      </Row>
+
+      {probe !== undefined && (
+        <div className="pt-1.5">
+          <Verdict
+            tone={probe.endpointReachable ? 'ok' : 'warn'}
+            text={
+              probe.endpointReachable
+                ? `${probe.distro} reached Helm’s endpoint. A session hosted there gets the browser and session tools.`
+                : `${probe.distro} could not reach Helm’s endpoint, so a session hosted there launches with no tools.`
+            }
+            data-settings-wsl-reachable={String(probe.endpointReachable)}
+          />
+        </div>
+      )}
+
+      <Divider />
+
+      <Row
+        label="Restart WSL"
+        hint="The networking change applies at the next WSL start. Restarting it now is the only way to have it apply to a distribution that is already running - and it ends everything running in every distribution."
+      >
+        <Action data-settings-wsl-restart onClick={() => setAsking(true)}>
+          Restart WSL…
+        </Action>
+      </Row>
+
+      {/* The confirmation lives here rather than in the shell, because the
+          question is only ever asked from this button. Its accepting half is
+          the only caller of the shutdown channel. */}
+      {asking && (
+        <WslShutdownDialog
+          onCancel={() => setAsking(false)}
+          onConfirm={() => {
+            setAsking(false)
+            onShutdown()
+          }}
+        />
+      )}
+    </Group>
+  )
+}
+
+/**
+ * The `.wslconfig` sentence, which has five honest states and no merged one.
+ *
+ * A refusal is printed verbatim: it is the reason Helm will not rewrite the
+ * file, and the whole point of refusing is to say what is there so the user can
+ * fix it in their own editor.
+ */
+function verdictText(networking: WslNetworkingState | null, mirrored: boolean): string {
+  if (networking === null) return 'Reading .wslconfig…'
+  if (networking.refusal !== null) return networking.refusal
+  if (mirrored) {
+    return 'Mirrored networking is set. It applies from the next time WSL starts, not to a distribution already running.'
+  }
+  if (networking.networkingMode !== null) {
+    return `.wslconfig sets networkingMode=${networking.networkingMode}, so a distribution cannot reach Helm’s endpoint.`
+  }
+  return networking.exists
+    ? '.wslconfig does not set a networking mode, so WSL uses its NAT default.'
+    : 'There is no .wslconfig, so WSL uses its NAT default.'
 }
 
 function UpdatesGroup({

@@ -15,6 +15,8 @@ import {
   type LiveSession,
   type Profile,
   type ProfileDraft,
+  wslDistroOf,
+  type WslDistro,
   type Project,
   type SessionRecord,
   type WorkspaceTab
@@ -56,7 +58,6 @@ import {
   SaveAsTemplateDialog,
   SessionHistory,
   SessionsPane,
-  SettingsPane,
   SetupPane,
   Sidebar,
   SlidersIcon,
@@ -95,6 +96,7 @@ import { useBrowsers } from './useBrowsers'
 import { useShells } from './useShells'
 import { useUpdate } from './useUpdate'
 import { useUsage } from './useUsage'
+import { SettingsWithWsl } from './SettingsWithWsl'
 
 const KIND_ICON = {
   harness: HarnessIcon,
@@ -503,6 +505,33 @@ export function App(): JSX.Element {
   const [editing, setEditing] = useState<Profile | ProfileDraft | null>(null)
   const [saveProblems, setSaveProblems] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
+
+  /**
+   * The WSL distributions, read once and held for the window.
+   *
+   * A property of the machine rather than of the app's state, so it is asked
+   * for at mount rather than every time the editor opens - and it is the cheap
+   * half of the pair on purpose: `wsl:distros` enumerates without starting
+   * anything, where `wsl:probe` boots a stopped distribution to answer.
+   *
+   * An empty list is the ordinary answer on a machine with no WSL, and the
+   * editor renders the same either way.
+   */
+  const [distros, setDistros] = useState<WslDistro[]>([])
+  useEffect(() => {
+    let live = true
+    helm
+      .invoke('wsl:distros')
+      .then((found) => {
+        if (live) setDistros(found)
+      })
+      .catch(() => {
+        // No WSL is not a problem to report. The picker simply offers Windows.
+      })
+    return () => {
+      live = false
+    }
+  }, [])
 
   const projectsByPath = useMemo(() => {
     const map = new Map<string, Project>()
@@ -997,7 +1026,10 @@ export function App(): JSX.Element {
       agent: null,
       mcp: [],
       openingPrompt: null,
-      pinnedOrder: null
+      pinnedOrder: null,
+      // Windows, which is what a new profile has always meant. The editor's
+      // picker is where somebody chooses otherwise.
+      target: null
     }),
     []
   )
@@ -1602,6 +1634,7 @@ export function App(): JSX.Element {
         mode={setup.dialog}
         dir={setup.dialogDir}
         onChooseDir={setup.chooseDialogDir}
+        distros={setup.distros}
         onModeChange={setup.setDialogMode}
         problems={setup.dialogProblems}
         busy={setup.creating}
@@ -2137,6 +2170,12 @@ export function App(): JSX.Element {
                   running={configState.doctorRunning}
                   onRun={configState.runDoctor}
                   claudeVersion={info?.claudeVersion ?? null}
+                  // Derived from the scope's path, which is the whole rule: a
+                  // `\\wsl$\<distro>\...` scope is served by that
+                  // distribution's Claude Code, and the panel says so rather
+                  // than reporting on this machine's under a heading that
+                  // claims to be about the CLI sessions here actually use.
+                  distro={wslDistroOf(configState.scope?.path ?? '')}
                 />
               )}
             </ConfigConsole>
@@ -2253,7 +2292,7 @@ export function App(): JSX.Element {
 
         {activePane?.kind === 'settings' && (
           <div className="absolute inset-0">
-            <SettingsPane
+            <SettingsWithWsl
               status={setup.status}
               checking={setup.checking}
               onRecheck={setup.recheck}
@@ -2264,6 +2303,16 @@ export function App(): JSX.Element {
               scanning={launcher.scanning}
               onAddRoot={launcher.addRoot}
               onRemoveRoot={launcher.removeRoot}
+              // Anything already scanned is not a suggestion, and the filter is
+              // here rather than in the component so the pane renders a list
+              // rather than deciding what belongs in one.
+              suggestedRoots={setup.suggestions.filter(
+                (suggestion) =>
+                  !(settings?.scanRoots ?? []).some(
+                    (root) => root.toLowerCase() === suggestion.toLowerCase()
+                  )
+              )}
+              onAcceptRoot={setup.acceptSuggestion}
               pinnedProjects={settings?.pinnedProjects ?? DEFAULT_SETTINGS.pinnedProjects}
               // The same writer the sidebar's star goes through, so the two
               // surfaces cannot hold different ideas of what is pinned.
@@ -2325,6 +2374,15 @@ export function App(): JSX.Element {
               }
               sessionMcp={settings?.sessionMcp ?? DEFAULT_SETTINGS.sessionMcp}
               onSessionMcpChange={(sessionMcp) => writeSettings({ sessionMcp })}
+              // The WSL group's state is not passed from here at all. It is
+              // mounted with the pane by `SettingsWithWsl`, which is what makes
+              // its two reads happen on every open rather than once per window
+              // - see that file for the two bugs that were.
+              //
+              // Nothing about it is a row in `app_settings`, deliberately:
+              // `networkingMode` lives in the user's own `.wslconfig` and is
+              // machine-wide, so Helm keeps no copy of it that could disagree
+              // with the file. The group reads that file and writes that file.
               contentWrap={settings?.contentWrap ?? DEFAULT_SETTINGS.contentWrap}
               onContentWrapChange={(contentWrap) => writeSettings({ contentWrap })}
               contentWrapIndent={
@@ -2656,6 +2714,7 @@ export function App(): JSX.Element {
           <ProfileEditor
             initial={editing}
             projects={discovery?.projects ?? []}
+            distros={distros}
             predict={predictProfile}
             problems={saveProblems}
             saving={saving}

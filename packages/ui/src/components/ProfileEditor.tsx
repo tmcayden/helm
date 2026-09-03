@@ -7,13 +7,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   EFFORT_LEVELS,
   PERMISSION_MODES,
+  formatLaunchTarget,
+  parseLaunchTarget,
+  wslDistroOf,
   type EffectiveEntry,
   type EffectiveMcpServer,
   type EffortLevel,
   type PermissionMode,
   type Profile,
   type ProfileDraft,
-  type Project
+  type Project,
+  type WslDistro
 } from '@helm/core/types'
 import { cn } from '../lib/cn'
 import { Checkbox } from './Checkbox'
@@ -40,6 +44,16 @@ export interface ProfileEditorProps {
   initial: Profile | ProfileDraft
   /** Discovered projects, for the overlay and access pickers. */
   projects: Project[]
+  /**
+   * WSL distributions this machine has, for the target picker.
+   *
+   * Empty - the ordinary case on a machine with no WSL - leaves the picker
+   * showing Windows alone rather than hiding it: a control that appears only on
+   * some machines is a control nobody learns is there. A distro named by the
+   * profile but missing from this list is still offered, because a target is
+   * checked at launch and not here; see `validateProfile`.
+   */
+  distros?: readonly WslDistro[] | undefined
   /**
    * What a session at `root` with `overlays` would resolve.
    *
@@ -110,6 +124,7 @@ const MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const
 export function ProfileEditor({
   initial,
   projects,
+  distros = [],
   predict,
   problems = [],
   saving = false,
@@ -127,6 +142,7 @@ export function ProfileEditor({
   const [agent, setAgent] = useState(initial.agent ?? '')
   const [mcp, setMcp] = useState<string[]>(initial.mcp)
   const [openingPrompt, setOpeningPrompt] = useState(initial.openingPrompt ?? '')
+  const [target, setTarget] = useState(formatLaunchTarget(initial.target))
   const [filter, setFilter] = useState('')
 
   const nameRef = useRef<HTMLInputElement>(null)
@@ -260,6 +276,57 @@ export function ProfileEditor({
     return [...chosen, ...matching]
   }, [projects, filter, overlays, access])
 
+  /**
+   * The distros to offer, plus the one this profile already names.
+   *
+   * A saved target whose distro is not installed here stays in the list rather
+   * than silently reverting to Windows - a profile opened on a second machine
+   * would otherwise be re-pointed by the act of looking at it, and the user
+   * would have no way to tell it had happened. Existence is the launch's
+   * question, and the launch has somewhere to put the sentence.
+   */
+  /**
+   * The distro the root lives inside, when it lives inside one.
+   *
+   * Not a suggestion. A Windows process cannot be spawned with a UNC working
+   * directory - `CreateProcess` answers ENOENT, measured - so a project under
+   * `\\wsl$\Ubuntu\...` on the Windows target is not a degraded session but a
+   * session that will not start. `prepareLaunch` therefore derives the target
+   * from the path and overrides the profile, and this is the same call, so the
+   * form shows what the launch will do rather than a choice it would discard.
+   *
+   * A root on a Windows drive stays a free choice, and deliberately: running a
+   * `C:\` project inside a distro works - the junctions resolve, `/mnt/c` is
+   * there - and is a thing somebody may want.
+   */
+  const resident = useMemo(() => wslDistroOf(root.trim()), [root])
+
+  /**
+   * What the form is actually going to save.
+   *
+   * Derived rather than synchronised into `target` by an effect: the path is
+   * the authority whenever it is resident, so there is no second state to keep
+   * level with it - and the chosen value is *remembered* underneath, so editing
+   * a root from a distro path back to a Windows one restores what the user had
+   * picked instead of silently leaving them in a distro they no longer name.
+   */
+  const effectiveTarget =
+    resident === null ? target : formatLaunchTarget({ kind: 'wsl', distro: resident })
+
+  const targetOptions = useMemo(() => {
+    const options = distros.map((distro) => ({
+      value: formatLaunchTarget({ kind: 'wsl', distro: distro.name }),
+      label: distro.name
+    }))
+    if (effectiveTarget !== 'windows' && !options.some((option) => option.value === effectiveTarget)) {
+      const named = parseLaunchTarget(effectiveTarget)
+      if (named !== null && named.kind === 'wsl') {
+        options.push({ value: effectiveTarget, label: `${named.distro} - not installed here` })
+      }
+    }
+    return options
+  }, [distros, effectiveTarget])
+
   const submit = (): void => {
     onSave({
       name: name.trim(),
@@ -272,7 +339,8 @@ export function ProfileEditor({
       agent: agent.trim() || null,
       mcp,
       openingPrompt: openingPrompt.trim() || null,
-      pinnedOrder: 'pinnedOrder' in initial ? initial.pinnedOrder : null
+      pinnedOrder: 'pinnedOrder' in initial ? initial.pinnedOrder : null,
+      target: parseLaunchTarget(effectiveTarget)
     })
   }
 
@@ -441,6 +509,30 @@ export function ProfileEditor({
               {PERMISSION_MODES.map((option) => (
                 <option key={option} value={option}>
                   {option}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label="Runs on"
+            hint={
+              resident !== null
+                ? `The root is inside ${resident}, so the session runs there.`
+                : effectiveTarget === 'windows'
+                  ? 'The claude on this machine.'
+                  : "That distribution's own claude, and its own ~/.claude."
+            }
+          >
+            <Select
+              value={effectiveTarget}
+              onChange={setTarget}
+              label="Runs on"
+              disabled={resident !== null}
+            >
+              <option value="windows">Windows</option>
+              {targetOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
                 </option>
               ))}
             </Select>
@@ -698,11 +790,14 @@ function Select({
   value,
   onChange,
   label,
+  disabled = false,
   children
 }: {
   value: string
   onChange: (value: string) => void
   label: string
+  /** For a field whose value is derived rather than chosen - see "Runs on". */
+  disabled?: boolean
   children: ReactNode
 }): JSX.Element {
   return (
@@ -710,8 +805,13 @@ function Select({
       <select
         value={value}
         aria-label={label}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className={cn(inputClass, 'appearance-none pr-7')}
+        className={cn(
+          inputClass,
+          'appearance-none pr-7',
+          disabled && 'cursor-not-allowed opacity-60'
+        )}
       >
         {children}
       </select>

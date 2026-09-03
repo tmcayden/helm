@@ -3,8 +3,90 @@ import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { GitState } from '../types'
+import { toWslPath, wslDistroOf } from '../wsl/path'
 
 const run = promisify(execFile)
+
+/**
+ * How to run `git` for a given working directory.
+ *
+ * For a path on this machine it is `git` with a `cwd`, which is what this file
+ * has always done. For a path inside a distro it is the **distro's** git,
+ * reached through `wsl.exe --cd`.
+ *
+ * That is not a preference, it is the only thing that works. Windows git
+ * refuses a WSL-resident repository outright:
+ *
+ * ```
+ * fatal: detected dubious ownership in repository at
+ *   '//wsl$/Ubuntu/home/me/harness/repos/lams'
+ * ```
+ *
+ * because the files carry the distro's uid rather than this user's. The
+ * documented remedy is a `safe.directory` entry per repository in the user's
+ * global config, which is Helm editing a file it does not own, once per
+ * repository somebody clones, to work around running the wrong git. The
+ * distro's own git has none of that to say, and its `--porcelain=v2` output is
+ * byte-identical - measured, which is why `parseGitStatus` needed no change.
+ *
+ * The cwd is passed to `--cd` as a **distro** path rather than the UNC one:
+ * that is the spelling the distro's git will report paths in, and it keeps the
+ * relay from translating on Helm's behalf.
+ */
+/**
+ * How to reach *any* repository-local tool from a path, not just git.
+ *
+ * Exported because the pull-request surface needs the identical decision and
+ * getting it wrong there was a measured bug rather than a hypothetical one. On
+ * 2026-09-03, `git remote get-url origin` run from Windows with a
+ * `\\wsl$\Ubuntu\...` working directory answered:
+ *
+ *     fatal, exit 128: warning: safe.directory 'undefined' not absolute
+ *
+ * and `gh repo view` failed the same way one level up ("failed to run git").
+ * The consequence was a distro-resident repository whose branch and dirty state
+ * the launcher showed correctly - because `readGitState` already routes - while
+ * the PR pane reported it as having nothing. Two surfaces answering the same
+ * question differently is exactly what one shared decision prevents.
+ *
+ * `file` is the program, `prefix` goes before the caller's own argv, and `cwd`
+ * is set **only** when the host may use it: `CreateProcess` cannot take a UNC
+ * working directory, and `execFile` does not even fail honestly there - it
+ * spawns with the directory silently defaulted (measured: `cmd.exe` reports
+ * "UNC paths are not supported. Defaulting to Windows directory."), so a
+ * command would run somewhere nobody chose.
+ */
+export function repoCommand(
+  cwd: string,
+  program: string
+): { file: string; prefix: string[]; cwd?: string } {
+  const distro = wslDistroOf(cwd)
+  if (distro === null) return { file: program, prefix: [], cwd }
+  const inside = toWslPath(cwd, { distro })
+  // A UNC path that will not translate cannot be reached from either side.
+  // Falling back to the Windows program would produce the ownership error
+  // above, so the caller gets the honest failure instead.
+  if (inside === null) return { file: program, prefix: [], cwd }
+  return { file: 'wsl.exe', prefix: ['-d', distro, '--cd', inside, '--', program] }
+}
+
+const gitCommand = (cwd: string): ReturnType<typeof repoCommand> => repoCommand(cwd, 'git')
+
+/** `execFile`, routed to whichever git owns this path. */
+async function runGit(
+  cwd: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number }
+): Promise<{ stdout: string }> {
+  const command = gitCommand(cwd)
+  const { stdout } = await run(command.file, [...command.prefix, ...args], {
+    ...(command.cwd === undefined ? {} : { cwd: command.cwd }),
+    timeout: options.timeout,
+    windowsHide: true,
+    ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer })
+  })
+  return { stdout }
+}
 
 /**
  * Working-tree state, read by shelling out to `git`.
@@ -38,8 +120,8 @@ export async function readGitState(projectPath: string): Promise<GitState | null
 
   let stdout: string
   try {
-    const result = await run(
-      'git',
+    const result = await runGit(
+      projectPath,
       [
         '--no-optional-locks',
         'status',
@@ -48,7 +130,7 @@ export async function readGitState(projectPath: string): Promise<GitState | null
         '--untracked-files=all',
         '--ignore-submodules=dirty'
       ],
-      { cwd: projectPath, timeout: TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
+      { timeout: TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }
     )
     stdout = result.stdout
   } catch (err) {
@@ -126,10 +208,8 @@ export function parseGitStatus(stdout: string): GitState {
  */
 export async function readGitBranch(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await run('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
-      cwd,
-      timeout: TIMEOUT_MS,
-      windowsHide: true
+    const { stdout } = await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      timeout: TIMEOUT_MS
     })
     const branch = stdout.trim()
     return branch === '' ? null : branch

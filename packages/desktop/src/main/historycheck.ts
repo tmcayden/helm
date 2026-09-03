@@ -10,14 +10,18 @@ import {
   readHistorySession,
   readHistorySessions,
   readHistoryTail,
+  resolveRecordedPath,
   scanTranscripts,
-  type HistorySession
+  type HistorySession,
+  type TranscriptFile,
+  type WslHome
 } from '@helm/core'
 import { screenshot, sendKey, sleep, squash, stripAnsi, typeText, waitFor } from './bridge'
 import { resolveClaudeCommand } from './claude-cli'
 import type { Check } from './fidelity'
 import { answerStartupGates, atPrompt, processAlive, type Collector, type CheckContext } from './sessionscheck'
 import { killSession, spawnSession } from './pty'
+import { wslHomes } from './wsl'
 
 /**
  * The session-history criteria, driven through the app the way a user reaches
@@ -50,73 +54,109 @@ interface Truth {
 }
 
 /**
- * Reads the same two sources the index does, with none of its code.
+ * Reads the same sources the index does, with none of its code.
  *
  * Deliberately naive - `readFileSync`, `split`, `JSON.parse` - because the
  * point is to disagree with the incremental reader if the incremental reader is
  * wrong.
+ *
+ * **Every** home, not just this machine's. A WSL distribution keeps a
+ * `~/.claude` of its own and the index reads both; an oracle that read one file
+ * would fail HIST-0 on any machine with WSL installed, and would be failing it
+ * for being out of date rather than for finding anything. On the machine this
+ * was written against the two differ by two orders of magnitude - 24 prompts
+ * here, 3,539 in the distro - so this is not a rounding difference.
+ *
+ * The *list* of homes comes from `wslHomes`, which is the app's own discovery,
+ * and that is deliberate rather than a lapse: HIST-0 asks whether the
+ * incremental reader agrees with a naive read **of the same files**. Which
+ * files those are is a different question, and re-deriving it here would test
+ * `wsl.exe --list` parsing twice and the thing under test not at all.
  */
-function readTruth(): Truth {
-  const home = claudeHome()
-  const historyFile = historyFileIn(home)
+function readTruth(homes: readonly string[]): Truth {
+  const historyFile = historyFileIn(homes[0] ?? claudeHome())
   const prompts: Truth['prompts'] = []
   const sessions = new Map<string, string>()
   const projects = new Set<string>()
-
-  for (const line of readFileSync(historyFile, 'utf8').split('\n')) {
-    if (line.trim() === '') continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(line)
-    } catch {
-      continue
-    }
-    const row = parsed as Record<string, unknown>
-    if (typeof row['sessionId'] !== 'string' || typeof row['project'] !== 'string') continue
-    const sessionId = row['sessionId']
-    const project = row['project']
-    prompts.push({
-      sessionId,
-      project,
-      display: typeof row['display'] === 'string' ? row['display'] : '',
-      timestamp: typeof row['timestamp'] === 'number' ? row['timestamp'] : 0
-    })
-    if (!sessions.has(sessionId)) sessions.set(sessionId, project)
-    projects.add(project.toLowerCase())
-  }
-
   const transcripts = new Map<string, number>()
-  const projectsDir = projectsDirIn(home)
-  let dirs: string[]
-  try {
-    dirs = readdirSync(projectsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
-  } catch {
-    dirs = []
-  }
-  for (const dir of dirs) {
-    for (const name of readdirSync(join(projectsDir, dir))) {
-      if (!/^[0-9a-f-]{36}\.jsonl$/i.test(name)) continue
-      const id = name.slice(0, -6).toLowerCase()
-      const size = statSync(join(projectsDir, dir, name)).size
-      if ((transcripts.get(id) ?? -1) < size) transcripts.set(id, size)
+
+  for (const home of homes) {
+    let text: string
+    try {
+      text = readFileSync(historyFileIn(home), 'utf8')
+    } catch {
+      // A home with no history file yet contributes nothing, which is a true
+      // answer about it rather than a reason to stop.
+      text = ''
+    }
+
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const row = parsed as Record<string, unknown>
+      if (typeof row['sessionId'] !== 'string' || typeof row['project'] !== 'string') continue
+      const sessionId = row['sessionId']
+      const project = row['project']
+      prompts.push({
+        sessionId,
+        project,
+        display: typeof row['display'] === 'string' ? row['display'] : '',
+        timestamp: typeof row['timestamp'] === 'number' ? row['timestamp'] : 0
+      })
+      if (!sessions.has(sessionId)) sessions.set(sessionId, project)
+      projects.add(project.toLowerCase())
+    }
+
+    const projectsDir = projectsDirIn(home)
+    let dirs: string[]
+    try {
+      dirs = readdirSync(projectsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+    } catch {
+      dirs = []
+    }
+    for (const dir of dirs) {
+      for (const name of readdirSync(join(projectsDir, dir))) {
+        if (!/^[0-9a-f-]{36}\.jsonl$/i.test(name)) continue
+        const id = name.slice(0, -6).toLowerCase()
+        const size = statSync(join(projectsDir, dir, name)).size
+        if ((transcripts.get(id) ?? -1) < size) transcripts.set(id, size)
+      }
     }
   }
 
   return { historyFile, prompts, sessions, projects, transcripts }
 }
 
-/** Sessions the file knows about that could actually be reopened right now. */
-function trulyResumable(truth: Truth): Set<string> {
+/**
+ * Sessions the file knows about that could actually be reopened right now.
+ *
+ * The `stat` goes through `resolveRecordedPath` for the reason the index's does:
+ * a distro's CLI records `/home/me/harness`, and `statSync` on Windows resolves
+ * that leading slash against the current drive root and reports it absent. An
+ * oracle that skipped the translation would insist every distro conversation is
+ * unresumable, and HIST-0 would be enforcing the bug.
+ */
+function trulyResumable(truth: Truth, distros: readonly WslHome[]): Set<string> {
+  const there = (path: string): boolean => {
+    try {
+      return statSync(path).isDirectory()
+    } catch {
+      return false
+    }
+  }
   const out = new Set<string>()
   for (const [id, project] of truth.sessions) {
     if (!truth.transcripts.has(id.toLowerCase())) continue
-    try {
-      if (statSync(project).isDirectory()) out.add(id)
-    } catch {
-      // The folder is gone, so `--resume` has nowhere to resolve the id.
-    }
+    const resolved = resolveRecordedPath(project, distros, there)
+    // The folder being gone means `--resume` has nowhere to resolve the id.
+    if (resolved !== null && there(resolved)) out.add(id)
   }
   return out
 }
@@ -239,7 +279,23 @@ async function closeSessionTab(win: BrowserWindow, id: number): Promise<boolean>
  */
 async function typeSearch(win: BrowserWindow, term: string): Promise<string> {
   const typeable = term.replace(/[^\x20-\x7e]/g, ' ').replace(/\s+/g, ' ').trim()
-  const clicked = await click(win, 'input[data-history-search]')
+  let clicked = await click(win, 'input[data-history-search]')
+  if (!clicked) {
+    /*
+     * The list is not on screen, which in the **compact** layout is a state and
+     * not a fault: `showList` is `!compact || selected === null`, and `compact`
+     * is true for as long as a session is running - which this driver
+     * guarantees, because it starts two. So from the moment a row is selected,
+     * the detail replaces the list and takes the search box with it.
+     *
+     * The way back is the affordance a user has, so it is the one driven here:
+     * `PaneBack`'s button, which clears the selection. Pressed once and the
+     * click retried - a second failure is a real absence and still throws.
+     */
+    await click(win, '[data-pane-back]')
+    await pollJs(win, `document.querySelector('input[data-history-search]')`, 5000)
+    clicked = await click(win, 'input[data-history-search]')
+  }
   if (!clicked) throw new Error('the search box is not on screen')
   await js<boolean>(
     win,
@@ -325,8 +381,11 @@ export async function runHistoryChecks(
 
   const checks: Check[] = []
   const { win, services } = ctx
-  const truth = readTruth()
-  const resumableTruth = trulyResumable(truth)
+  // The same homes the app indexes, found the same way it finds them - see
+  // `readTruth` for why that sharing is the right boundary here.
+  const distros = await wslHomes()
+  const truth = readTruth([claudeHome(), ...distros.map((home) => home.claudeHome)])
+  const resumableTruth = trulyResumable(truth, distros)
 
   // -------------------------------------------------------------------------
   // HIST-0: the index agrees with the file
@@ -776,7 +835,6 @@ export async function runHistoryChecks(
     .sessions.filter((s) => s.firstPrompt.trim().length >= 12 && s.firstPrompt.length <= 120)
     .sort((a, b) => (a.transcriptBytes ?? 0) - (b.transcriptBytes ?? 0))
 
-  const before = ctx.sessions.list().length
   let resumed: {
     target: HistorySession
     id: number
@@ -794,12 +852,30 @@ export async function runHistoryChecks(
     await typeSearch(win, target.firstPrompt.slice(0, 24))
     const clickedRow = await click(win, `button[data-session="${target.sessionId}"]`)
     await sleep(400)
+
+    /*
+     * The session this iteration starts, identified by **id** rather than by
+     * being last in the list - and the ids are taken before the click that
+     * creates one.
+     *
+     * `before` is captured once, outside the loop, so on the second candidate
+     * `list().length > before` is already true from the first one's session and
+     * the wait returns instantly - handing back `at(-1)`, which is the *first*
+     * attempt's session. The report then describes one session under another
+     * one's target: on 2026-09-03 HIST-5 said it had resumed a `C:\.harness\gse`
+     * conversation and printed an argv resuming a different id inside Ubuntu,
+     * which reads exactly like a resume aimed at the wrong session and was not.
+     */
+    const idsBefore = new Set(ctx.sessions.list().map((session) => session.id))
     const clickedResume = await click(win, `button[data-resume="${target.sessionId}"]`)
     if (!clickedRow || !clickedResume) continue
 
-    const started = await waitFor(() => ctx.sessions.list().length > before, 20_000)
+    const started = await waitFor(
+      () => ctx.sessions.list().some((session) => !idsBefore.has(session.id)),
+      20_000
+    )
     if (!started) continue
-    const record = ctx.sessions.list().at(-1)
+    const record = ctx.sessions.list().find((session) => !idsBefore.has(session.id))
     if (!record) continue
 
     const stopGates = answerStartupGates(ctx, collector, [record.id])
@@ -886,8 +962,22 @@ export async function runHistoryChecks(
   // -------------------------------------------------------------------------
   // HIST-6: a reaped session explains itself
   // -------------------------------------------------------------------------
+  /*
+   * A session whose *transcript* is gone and whose folder is still there.
+   *
+   * `projectExists` is the half this used to leave out, and the row it picked
+   * on 2026-09-03 is why it matters: the first no-transcript session in the
+   * index was one whose working directory had also gone - a deleted worktree
+   * inside a WSL distribution - so the pane quite correctly explained the
+   * *folder*, and this probe compared that against wording about a transcript.
+   * Two honest states, and only one of them is what HIST-6 is about.
+   *
+   * It changed because the index widened: with a distribution's history read
+   * alongside this machine's, the first such row is no longer the same row. The
+   * probe was always this fragile; the new data is what showed it.
+   */
   const reapedTarget = readHistorySessions(services.store)
-    .sessions.filter((s) => s.transcriptFile === null && s.promptCount >= 2)
+    .sessions.filter((s) => s.transcriptFile === null && s.promptCount >= 2 && s.projectExists)
     .at(0)
 
   let reapedView: {
@@ -1147,6 +1237,40 @@ export async function runHistoryChecks(
       // The field open over the heading, which is the one state in this pane
       // design-shot's itinerary cannot reach.
       const shotField = await screenshot(win, shotDir, 'history-rename-field.png')
+
+      /*
+       * What the field was holding, and how much of it was selected.
+       *
+       * Recorded rather than assumed, because this is what HIST-10 got wrong
+       * for a whole run: the field opens pre-filled with the current title and
+       * selects it (`autoFocus` plus `onFocus={select()}`), so a person typing
+       * replaces it - but this driver typed into it without establishing that,
+       * and got `<title><NAME>` written into `history_names`. The probe then
+       * reported the painted title as wrong, which it was, about a name nobody
+       * would ever have produced by hand.
+       *
+       * So the selection is measured and reported, and then the driver selects
+       * the field's contents itself before typing. If the app ever stops
+       * selecting on focus, `selectedOnOpen` in the detail says so while the
+       * rest of the check goes on testing renaming.
+       */
+      const fieldOnOpen = await js<{ value: string; selected: number; focused: boolean }>(
+        win,
+        `(() => { const el = document.querySelector('input[data-history-name]');
+          if (!el) return { value: '', selected: -1, focused: false };
+          return {
+            value: el.value,
+            selected: (el.selectionEnd ?? 0) - (el.selectionStart ?? 0),
+            // Which of the two failures this is: an app that did not select, or
+            // a field the focus never reached.
+            focused: document.activeElement === el
+          } })()`
+      )
+      await js<boolean>(
+        win,
+        `(() => { const el = document.querySelector('input[data-history-name]');
+          if (!el) return false; el.focus(); el.select(); return true })()`
+      )
       await typeText(win, NAME, 8)
       await sendKey(win, 'Enter')
       /*
@@ -1159,12 +1283,32 @@ export async function runHistoryChecks(
        * where the criterion binds. A poll whose result nobody reads is a
        * `waitFor` wearing a claim's clothes.
        */
+      /*
+       * The row is on the *list*, and in the compact layout the list is not on
+       * screen while a session is selected - the detail replaces it. This runs
+       * with two sessions alive, so compact is on, and the row this is about is
+       * the one just selected: the assertion had no element to read and failed
+       * while the rename had worked perfectly. `typeSearch` learned the same
+       * lesson earlier in this file; this is the second place that needed it.
+       *
+       * Pressing back is what a user does, and it is safe when the list is
+       * already showing: the button is only rendered in the compact-and-
+       * selected state.
+       */
+      await click(win, '[data-pane-back]')
+      await pollJs(win, `document.querySelector('input[data-history-search]')`, 5000)
+
       const paintedAfterRename = await pollJs(
         win,
         `document.querySelector('button[data-session="${target.sessionId}"] [data-session-title]')
           ?.textContent === ${JSON.stringify(NAME)}`,
         8000
       )
+
+      // Back into the detail, which the rest of this group drives - the clear
+      // control lives there.
+      await click(win, `button[data-session="${target.sessionId}"]`)
+      await sleep(400)
 
       const afterRename = readHistorySession(services.store, target.sessionId)
       // The DOM above is the evidence; this is only the picture. `capturePage`
@@ -1182,13 +1326,36 @@ export async function runHistoryChecks(
       services.store.raw
         .prepare('UPDATE history_sessions SET first_prompt = ? WHERE session_id = ?')
         .run(CANARY, target.sessionId)
-      const home = claudeHome()
-      const file = historyFileIn(home)
+      /*
+       * Every home, re-read from zero, which is what the service itself does
+       * when it sees a reset.
+       *
+       * A reset empties both tables - the rows do not record which file they
+       * came from - so forcing one over this machine's history alone would
+       * rebuild the index out of 24 prompts and throw away the distro's 3,539.
+       * The rest of this group then measures the rebuild against a `truth` that
+       * covers both, and would fail for a reason that is this driver's rather
+       * than the code's.
+       */
+      const rebuildDistros = await wslHomes()
+      const homes = [claudeHome(), ...rebuildDistros.map((entry) => entry.claudeHome)]
+      const transcripts = new Map<string, TranscriptFile>()
+      for (const home of homes) {
+        for (const [id, entry] of scanTranscripts(projectsDirIn(home))) transcripts.set(id, entry)
+      }
       indexHistory(services.store, {
-        file,
-        tail: { ...readHistoryTail(file, 0), reset: true },
-        transcripts: scanTranscripts(projectsDirIn(home)),
-        directoryExists
+        sources: homes.map((home) => {
+          const file = historyFileIn(home)
+          return { file, tail: { ...readHistoryTail(file, 0), reset: true } }
+        }),
+        transcripts,
+        // The service's own resolver, not the bare one: a distro's recorded
+        // `/home/me/...` is absent to `statSync` on Windows, and a rebuild that
+        // used the bare check would mark every distro session unresumable.
+        directoryExists: (path) => {
+          const resolved = resolveRecordedPath(path, rebuildDistros, directoryExists)
+          return resolved !== null && directoryExists(resolved)
+        }
       })
       const afterReset = readHistorySession(services.store, target.sessionId)
 
@@ -1213,6 +1380,32 @@ export async function runHistoryChecks(
       // Asserted for the reason above: the row going back to its derived title
       // is the visible half of "clearing restores it", and the database half
       // would be satisfied by a pane that never repainted.
+      /*
+       * The two halves are read one after the other, because in the compact
+       * layout they cannot both be on screen.
+       *
+       * The claim is that the detail's heading and the row's title are the same
+       * derived string, and it used to be one expression querying both at once
+       * - which is unsatisfiable the moment the pane is narrow enough to show
+       * one at a time, and this group runs with two sessions alive, so it
+       * always is. The heading is read where it lives, the list is brought
+       * back, and the row is compared against the string the heading gave.
+       */
+      // Waited for, not snapshotted. Read the instant after the click it is
+      // still the name that was just cleared, and the row would then be
+      // compared against a heading from before the clear - which is how this
+      // failed on its first run, in the layout where both halves *are* visible.
+      await pollJs(
+        win,
+        `document.querySelector('[data-history-title]')?.textContent !== ${JSON.stringify(NAME)}`,
+        8000
+      )
+      const detailTitle = await js<string>(
+        win,
+        `(document.querySelector('[data-history-title]')?.textContent ?? '')`
+      )
+      await click(win, '[data-pane-back]')
+      await pollJs(win, `document.querySelector('input[data-history-search]')`, 5000)
       const paintedAfterClear = await pollJs(
         win,
         `(() => {
@@ -1220,7 +1413,7 @@ export async function runHistoryChecks(
           const title = row?.querySelector('[data-session-title]')?.textContent;
           return row?.dataset.named === 'false' && title !== '' &&
             title !== ${JSON.stringify(NAME)} &&
-            document.querySelector('[data-history-title]')?.textContent === title
+            title === ${JSON.stringify(detailTitle)}
         })()`,
         8000
       )
@@ -1250,6 +1443,15 @@ export async function runHistoryChecks(
       renamed = {
         sessionId: target.sessionId,
         typed: NAME,
+        // The field as the user meets it: pre-filled with the current title,
+        // and how much of it the app had selected. Anything but the whole
+        // string means typing would append rather than replace.
+        fieldOnOpen: {
+          value: fieldOnOpen.value,
+          selectedChars: fieldOnOpen.selected,
+          focusedOnOpen: fieldOnOpen.focused,
+          selectedOnOpen: fieldOnOpen.selected === fieldOnOpen.value.length
+        },
         paintedAfterRename,
         labelAfterRename: afterRename?.label ?? null,
         canaryAfterRebuild: afterReset?.firstPrompt === CANARY,

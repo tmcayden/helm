@@ -104,13 +104,21 @@ function isFile(path: string): boolean {
  * with `CLAUDE_CONFIG_DIR` set browses the tree the CLI would actually read.
  * The base path stays the home directory, because `~/CLAUDE.md` is not a thing
  * and the user scope's instruction file lives *inside* `.claude`.
+ *
+ * There can be more than one of these, which is why the label is a parameter.
+ * A WSL distribution has a `~/.claude` of its own - its own settings, its own
+ * skills, its own `history.jsonl` - and a session hosted there reads that one
+ * and never this machine's. Helm opens it over `\\wsl$\<distro>\...`, so it is
+ * an ordinary directory to everything below here and needs no second walker;
+ * what it needs is to be distinguishable in the switcher, hence "User
+ * (Ubuntu)" beside plain "User".
  */
-export function userConfigScope(home: string = claudeHome()): ConfigScope {
+export function userConfigScope(home: string = claudeHome(), label = 'User'): ConfigScope {
   return {
     kind: 'user',
     path: home,
     claudeDir: home,
-    label: 'User',
+    label,
     exists: isDir(home)
   }
 }

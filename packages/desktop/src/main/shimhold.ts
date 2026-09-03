@@ -70,7 +70,8 @@ export async function runShimHold(ctx: ProfilesContext, dataDir: string): Promis
     agent: null,
     mcp: [],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   })
 
   const detail: Record<string, unknown> = {

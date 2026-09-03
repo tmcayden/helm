@@ -201,6 +201,30 @@ export function answerConsent(ctx: ProfilesContext, collector: Collector, ids: n
         const seen = count(text, re)
         if (seen > (answered.get(key) ?? 0)) {
           answered.set(key, seen)
+          if (kind === 'trust') {
+            /*
+             * Confirming the trust gate means confirming the *right option*,
+             * and which one is selected is not something to assume.
+             *
+             * Claude Code 2.1.259 opens this gate with `No, exit` selected -
+             * the safe default, and the correct one for a person. A bare Enter
+             * therefore answers **no**, the CLI exits, and the check that was
+             * waiting for a prompt waits out its whole timeout and reports "the
+             * session never reached a prompt" with no hint that it had killed
+             * its own session. That is what CFG-9 and CFG-10 were doing, and
+             * the tail in the report is what finally showed it.
+             *
+             * So the marker is read rather than the default guessed: `squash`
+             * keeps the `❯`, which sits immediately before the selected label.
+             * On `no` the selection is moved down first; on `yes` - or on a
+             * screen where the marker cannot be found, which is the state a
+             * reworded gate would produce - Enter alone, which is what this did
+             * before and is no worse than it was.
+             */
+            const marker = text.lastIndexOf('❯')
+            const selected = marker === -1 ? '' : text.slice(marker + 1, marker + 12)
+            if (selected.startsWith('no')) ctx.sessions.input(id, '\x1b[B')
+          }
           ctx.sessions.input(id, keys)
         }
       }
@@ -1256,7 +1280,8 @@ async function runFormChecks(
     agent: ghostAgent,
     mcp: [ghostServer],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   }
 
   // Through the app's own channel, not the store: this is a profile as the form
@@ -1372,7 +1397,8 @@ async function runFixtureCheck(
     agent: null,
     mcp: [],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   })
 
   const firstRun = await probeFixture(ctx, collector, fixtureProfile.id, 'HELMPROBEALPHA')

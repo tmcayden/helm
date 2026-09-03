@@ -102,3 +102,64 @@ export function readUsage(file: string): UsageSnapshot {
 
   return parseUsage(root, file)
 }
+
+/**
+ * The best of several readings of the same account: the freshest one.
+ *
+ * Every Claude Code install writes its own `~/.claude.json`, and once Helm
+ * reads the `~/.claude` inside each WSL distribution there are several of them
+ * - this machine's and one per distro. They are not several accounts and not
+ * several plans: `cachedUsageUtilization` is the *server's* answer about the
+ * account, cached by whichever CLI last asked. So the files do not need
+ * reconciling, they need ranking, and `fetchedAtMs` is the ranking - the file
+ * fetched most recently is the most recent description of the one thing they
+ * all describe.
+ *
+ * This is what the WSL paragraph in SPEC 4.8 said could not be decided ("every
+ * CLI writes its own copy of the same account-level reading and choosing
+ * between two would be a rule with nothing behind it"). The evidence that
+ * settles it was already in the file - each copy is stamped with when it was
+ * fetched - and the failure the old answer caused is the one the usage surface
+ * exists to prevent: somebody who works entirely inside a distro got this
+ * machine's stale or absent percentage under a dollar figure summed over *both*
+ * homes' transcripts, so the two figures beside each other described different
+ * things.
+ *
+ * Deliberately ranked by fetch time and never by whether the reading is
+ * paintable. Preferring the reading that happens to produce a number would be
+ * choosing the answer first and the evidence after - a stale or rolled-over
+ * *freshest* reading is the honest state of the account, and `usageView` is the
+ * one place allowed to decide what may be painted from it.
+ *
+ * Ties keep the earlier candidate, which is why the caller passes this machine
+ * first: two files stamped the same millisecond are the same reading, and the
+ * one that needs no explanation in the tooltip wins. A machine with one home
+ * therefore takes exactly the path it took before this existed.
+ */
+export function freshestUsage(snapshots: readonly UsageSnapshot[]): UsageSnapshot {
+  let best: UsageSnapshot | null = null
+  for (const snapshot of snapshots) {
+    // A snapshot carrying a problem carries no `fetchedAtMs` either, so this is
+    // one test rather than two - and it is the reason an absent distro file can
+    // never beat a real reading however the loop is ordered.
+    if (snapshot.problem !== null || snapshot.fetchedAtMs === null) continue
+    if (best === null || snapshot.fetchedAtMs > (best.fetchedAtMs ?? 0)) best = snapshot
+  }
+  // Nothing usable anywhere: hand back the first candidate's own reason rather
+  // than inventing one. That is this machine's `~/.claude.json` in every real
+  // configuration, so "no figures yet" still names the file somebody can look
+  // at, and the surface paints nothing exactly as it did before.
+  return best ?? snapshots[0] ?? usageProblem('', 'no-file', 'No usage file to read.')
+}
+
+/**
+ * Reads every install's `~/.claude.json` and returns the freshest reading.
+ *
+ * One `readUsage` per candidate, on the main process's thread, which is
+ * affordable for the same reason one was: a whole-file parse measures about a
+ * millisecond at 134 KB, and there is one file per installed distribution
+ * behind a debounce that only fires when a `stat` says something changed.
+ */
+export function readUsageAcross(files: readonly string[]): UsageSnapshot {
+  return freshestUsage(files.map(readUsage))
+}

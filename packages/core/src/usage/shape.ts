@@ -90,6 +90,21 @@ export interface UsageSnapshot {
    * percent mode and on any build where the index has not run.
    */
   spend: UsageSpend | null
+  /**
+   * Which install this reading was taken from, when it was not this machine's.
+   *
+   * A distribution's name, e.g. `Ubuntu`. Null for this machine's own reading,
+   * which is the ordinary case and wants no sentence: a figure nobody has
+   * reason to doubt should not be annotated into looking doubtful. Set only
+   * where the choice between installs is made (`main/usage.ts`), because the
+   * *name* of an install is the host's knowledge - `read.ts` ranks files and
+   * has never heard of a distribution.
+   *
+   * A field rather than something the renderer parses back out of `file`: the
+   * path is evidence, not a label, and it only happens to carry the distro's
+   * name today.
+   */
+  origin: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +218,14 @@ const problem = (kind: UsageProblemKind, detail: string): UsageProblem => ({ kin
 
 /** A snapshot carrying nothing but the reason it carries nothing. */
 export function usageProblem(file: string, kind: UsageProblemKind, detail: string): UsageSnapshot {
-  return { file, fetchedAtMs: null, limits: [], problem: problem(kind, detail), spend: null }
+  return {
+    file,
+    fetchedAtMs: null,
+    limits: [],
+    problem: problem(kind, detail),
+    spend: null,
+    origin: null
+  }
 }
 
 /**
@@ -267,7 +289,7 @@ export function parseUsage(root: unknown, file: string): UsageSnapshot {
     )
   }
 
-  return { file, fetchedAtMs, limits, problem: null, spend: null }
+  return { file, fetchedAtMs, limits, problem: null, spend: null, origin: null }
 }
 
 // ---------------------------------------------------------------------------

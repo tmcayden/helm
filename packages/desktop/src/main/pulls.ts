@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { homedir } from 'node:os'
 import { promisify } from 'node:util'
 import {
   checkoutPull,
@@ -24,8 +25,10 @@ import {
   renderMarkdown,
   renderPullPrompt,
   replaceRepoPulls,
+  repoCommand,
   upsertPrRepo,
   writePullDetail,
+  wslDistroOf,
   MAX_DIFF_BYTES,
   type AppSettings,
   type GhCommand,
@@ -56,6 +59,12 @@ import {
 } from './gh-cli'
 
 const run = promisify(execFile)
+
+/** gh's own complaint, trimmed to the line worth showing. */
+function firstLineOf(text: string): string | null {
+  const line = text.trim().split(/\r?\n/)[0]?.trim()
+  return line === undefined || line === '' ? null : line
+}
 
 /**
  * Keeping the Pulls pane level with what GitHub says.
@@ -365,12 +374,33 @@ export function createPullsService({
    */
   async function readOrigin(path: string): Promise<string | null> {
     if (remoteFixture !== null) return remoteFixture[path] ?? null
+    /*
+     * Routed through whichever git owns the path, which for a repository inside
+     * a WSL distribution is that distribution's.
+     *
+     * This one line is what the whole surface hung on. Measured 2026-09-03: run
+     * from Windows with a `\\wsl$\Ubuntu\...` working directory, `git remote
+     * get-url origin` exits 128 with `safe.directory 'undefined' not absolute`
+     * - so `readOrigin` returned null, the repository never got a slug, and the
+     * pane reported a distro-resident repo as having no pull requests. Not an
+     * error the user could act on: "nothing to fetch" is the same answer this
+     * gives for a folder that genuinely is not a repository.
+     *
+     * `repoCommand` is the same decision `readGitState` makes, shared rather
+     * than copied - the launcher showing a branch for a repo the PR pane called
+     * empty was two answers to one question.
+     */
+    const command = repoCommand(path, 'git')
     try {
-      const { stdout } = await run('git', ['--no-optional-locks', 'remote', 'get-url', 'origin'], {
-        cwd: path,
-        timeout: GIT_TIMEOUT_MS,
-        windowsHide: true
-      })
+      const { stdout } = await run(
+        command.file,
+        [...command.prefix, '--no-optional-locks', 'remote', 'get-url', 'origin'],
+        {
+          ...(command.cwd === undefined ? {} : { cwd: command.cwd }),
+          timeout: GIT_TIMEOUT_MS,
+          windowsHide: true
+        }
+      )
       const url = stdout.trim()
       return url === '' ? null : url
     } catch {
@@ -925,9 +955,47 @@ export function createPullsService({
         )
       }
 
-      await checkoutPull(command, slug, request.number, request.repoPath, {
+      /*
+       * The one gh call that is about a directory, so the one that has to be
+       * the gh that can reach it.
+       *
+       * Every other call here names its repository with `--repo` and is
+       * therefore cwd-independent, which is why they stay on this machine's gh
+       * and this machine's `gh auth`. A checkout moves a working tree, and a
+       * tree inside a distribution can only be moved from inside it - Windows
+       * gh against a `\\wsl$\...` path fails at the git underneath it (measured:
+       * `failed to run git: warning: safe.directory 'undefined' not absolute`).
+       *
+       * That means the distro's own gh, with its own authentication, and it may
+       * have neither. Both failures are reported rather than guessed at: the
+       * run's own first line says which, and the sentence below names the
+       * distribution so "gh: command not found" is not a mystery.
+       */
+      const routed = repoCommand(request.repoPath, 'gh')
+      const inDistro = routed.file !== 'gh'
+      const checkoutCommand: GhCommand = inDistro
+        ? { file: routed.file, prefixArgs: routed.prefix, resolved: 'gh', hostCwd: homedir() }
+        : command
+
+      const run = await checkoutPull(checkoutCommand, slug, request.number, request.repoPath, {
         timeoutMs: CHECKOUT_TIMEOUT_MS
       })
+      /*
+       * Reported, not thrown, and git is still the source of truth below.
+       *
+       * The exit code used to be dropped entirely: the design reads the branch
+       * back from git rather than trusting gh's output, which is right, but it
+       * left a checkout that did not happen showing up only as a confusing
+       * "the local branch is not what was expected" a few lines further down.
+       * The reason belongs beside the outcome.
+       */
+      if (!run.ok) {
+        warnings.push(
+          inDistro
+            ? `gh could not check the pull request out inside ${wslDistroOf(request.repoPath) ?? 'the distribution'}: ${run.error ?? firstLineOf(run.stderr) ?? 'it failed with no output'}. That distribution needs its own gh, signed in.`
+            : `gh could not check the pull request out: ${run.error ?? firstLineOf(run.stderr) ?? 'it failed with no output'}.`
+        )
+      }
 
       // Asked of git rather than assumed from `headRefName`, and the difference
       // is real: `gh pr checkout` renames a fork's branch when the name is

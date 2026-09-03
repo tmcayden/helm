@@ -917,9 +917,30 @@ export interface HistorySummary {
   resumable: number
   /** Newest prompt in the index, or null when it is empty. */
   latestAt: number | null
-  /** The file being indexed, so the UI can say where this came from. */
+  /**
+   * The primary history file - this machine's - so the UI can say where the
+   * index came from and offer to re-read it.
+   */
   historyFile: string
-  /** Bytes of it consumed so far; the cursor an incremental pass resumes at. */
+  /**
+   * Every file being indexed, primary first.
+   *
+   * More than one whenever a WSL distribution is installed: a session hosted in
+   * a distro appends to *that* distro's `~/.claude/history.jsonl` and never to
+   * this machine's, so an index over one file would show the launcher a user's
+   * Windows sessions and silently omit their Linux ones. They are read together
+   * and counted together - a session is a session - and this is the list that
+   * lets the UI say so instead of naming one file as if it were the whole
+   * story.
+   */
+  historyFiles: string[]
+  /**
+   * Bytes consumed so far, summed across every file.
+   *
+   * Also what the renderer keys its caches on, which works for the same reason
+   * it worked as a single cursor: it only ever grows while the sources are
+   * stable, and a source resetting rebuilds everything anyway.
+   */
   indexedBytes: number
   /** Set when the file could not be read at all. */
   error?: string | undefined
@@ -985,6 +1006,223 @@ export const PERMISSION_MODES = [
 export type PermissionMode = (typeof PERMISSION_MODES)[number]
 
 /**
+ * Where a session's `claude` process runs.
+ *
+ * Windows is the default and the only thing that existed before: `claude` is
+ * the executable, the pty is its own, and every path on the argv is already
+ * spelled the way the process will read it.
+ *
+ * A WSL target puts the CLI inside a distro, which changes three things and
+ * nothing else. The program becomes `wsl.exe` with the real entry point behind
+ * `--`; every path on the argv is translated (`core/wsl/path.ts`); and the
+ * session's `~/.claude` is the distro's, not this user's - which is why the
+ * history, transcript and usage readers take a root rather than asking
+ * `homedir()`.
+ *
+ * Measured 2026-09-02, and the reason the overlay mechanism needed no second
+ * implementation: a Windows directory junction surfaces inside the distro as a
+ * symlink whose target is *already* translated to `/mnt/c/...`, and reads
+ * through it work. So `--plugin-dir` composition (SPEC 2) crosses the boundary
+ * unchanged for any project on a Windows drive.
+ */
+export type LaunchTarget = { kind: 'windows' } | { kind: 'wsl'; distro: string }
+
+/**
+ * Re-exported here, and only here, so the profile editor can ask the question.
+ *
+ * A target is not really a preference: a project under `\\wsl$\Ubuntu\...`
+ * *cannot* run on Windows - `CreateProcess` refuses a UNC working directory -
+ * so the launcher derives the target from the path and overrides whatever the
+ * profile said. The editor showing a free choice that the launch then ignores
+ * would be a control that lies, so it asks the same function and says the
+ * answer instead.
+ *
+ * `wsl/path.ts` is pure - no `node:` imports anywhere behind it - which is what
+ * makes this legal to pull into the renderer bundle through `@helm/core/types`
+ * (CLAUDE.md, Boundaries). The rest of `wsl/` is not, and stays out.
+ */
+export { wslDistroOf } from './wsl/path'
+
+/** The default, and what every profile authored before targets existed means. */
+export const WINDOWS_TARGET: LaunchTarget = { kind: 'windows' }
+
+/**
+ * A launch target as one string: `windows`, or `wsl:<distro>`.
+ *
+ * One codec for both places a target is written down - the `target` column on
+ * `profiles`, and the `target:` key in an exported profile. They are the same
+ * fact, and two parsers would be two places for `wsl:Ubuntu` and `WSL:ubuntu`
+ * to start disagreeing.
+ *
+ * It lives here rather than in `wsl/` because the profile editor needs it, and
+ * a value import into the renderer bundle may only come from `@helm/core/types`
+ * (CLAUDE.md, Boundaries) - the package root reaches the filesystem.
+ *
+ * Null is not a failure: it is the answer for `windows`, for an absent value,
+ * and for a row written before targets existed, all of which mean the same
+ * launch. An unreadable value lands there too, because reads stay tolerant -
+ * a value from another build is a fact about the past.
+ */
+export function parseLaunchTarget(value: string | null | undefined): LaunchTarget | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (text === '' || text.toLowerCase() === 'windows') return null
+  const match = /^wsl:(.+)$/i.exec(text)
+  if (match === null) return null
+  const distro = (match[1] ?? '').trim()
+  return distro === '' ? null : { kind: 'wsl', distro }
+}
+
+/** Writes a target. Windows is written out rather than left absent, so the
+ * exported file shows what can be set where a missing key shows nothing. */
+export function formatLaunchTarget(target: LaunchTarget | null | undefined): string {
+  return target != null && target.kind === 'wsl' ? `wsl:${target.distro}` : 'windows'
+}
+
+/** What to call a target in a sentence a user reads. */
+export function launchTargetLabel(target: LaunchTarget | null | undefined): string {
+  return target != null && target.kind === 'wsl' ? target.distro : 'Windows'
+}
+
+/**
+ * One WSL distribution, as `wsl.exe -l -v` reports it.
+ *
+ * `state` is recorded and deliberately not used to gate anything: launching
+ * into a stopped distro starts it, so refusing one would be Helm inventing a
+ * failure the platform does not have.
+ */
+export interface WslDistro {
+  name: string
+  state: 'Running' | 'Stopped' | string
+  version: number
+  /** Whether `wsl.exe` marks this one with `*`. */
+  isDefault: boolean
+}
+
+/**
+ * What Helm found when it looked inside a distro.
+ *
+ * The same warn-do-not-block posture SPEC 7 pins for the Windows CLI: a distro
+ * with no `claude` is a row that says so, not a launch that fails later with no
+ * explanation.
+ */
+export interface WslProbe {
+  distro: string
+  /** Absolute path to `claude` inside the distro, or null. */
+  claudePath: string | null
+  /** What `claude --version` printed there, or null. */
+  claudeVersion: string | null
+  /** The distro's `$HOME`, which is where its `~/.claude` lives. */
+  home: string | null
+  /**
+   * Whether the distro can reach Helm's loopback endpoint.
+   *
+   * Measured 2026-09-02 on default NAT networking: it cannot. Neither
+   * `127.0.0.1` (which only mirrors under `networkingMode=mirrored`) nor the
+   * gateway address (the server binds loopback only, by the rule stated in
+   * `browser-mcp.ts` and SPEC 5) is reachable. So a WSL session gets no
+   * `--mcp-config` at all unless this is true, and the launch says why.
+   */
+  endpointReachable: boolean
+  /** Why the probe answered as it did, for the sentence the UI shows. */
+  problem: string | null
+}
+
+/**
+ * A distribution's `~/.claude`, in both spellings.
+ *
+ * The pair is what callers need, not one or the other. `claudeHome` is how this
+ * Windows process opens the directory - `\\wsl$\Ubuntu\home\me\.claude`, which
+ * every reader in `discovery/`, `usage/` and `config/` treats as an ordinary
+ * path - while `home` is what the distro itself calls it, which is what belongs
+ * in a sentence shown to somebody who works in that distro.
+ *
+ * Produced by `wslHomeOf` from a probe, and absent for a distro whose probe did
+ * not answer: a home Helm had to guess at would be a config console browsing
+ * nothing and an effective view composed from a directory that is not there.
+ */
+export interface WslHome {
+  distro: string
+  /** The distro's `$HOME`, Linux-spelled, as `bash -lc 'echo $HOME'` printed it. */
+  home: string
+  /** Its `~/.claude`, spelled as this Windows process must open it. */
+  claudeHome: string
+}
+
+/**
+ * The one networking mode Helm has anything to say about.
+ *
+ * `mirrored` is the fix for the fact SPEC 4.8 measured - loopback is shared
+ * with a distro only under it - and `nat` is the platform default and therefore
+ * the way back from having set it. Every other value WSL accepts is left to the
+ * file: Helm reads whatever is there verbatim and offers these two, rather than
+ * becoming a settings editor for a file it does not own.
+ */
+export type WslNetworkingMode = 'mirrored' | 'nat'
+
+/**
+ * What `%USERPROFILE%\.wslconfig` says about networking, as its text reads.
+ *
+ * Deliberately three separate facts rather than one verdict. Whether the file
+ * exists, what it sets, and whether Helm may rewrite it are answered
+ * independently, and none of them says whether a distro can reach the endpoint
+ * *now* - that is `WslProbe.endpointReachable`, measured by a connect, and a
+ * file saying `mirrored` before WSL has restarted is exactly the state a user
+ * has to be able to see.
+ */
+export interface WslConfigFacts {
+  /**
+   * The value under `[wsl2]`, verbatim, or null for a file that does not set
+   * one. Null is never rendered as `nat`: the default is a fact about the WSL
+   * build rather than about this file.
+   */
+  networkingMode: string | null
+  /** Whether the file has a `[wsl2]` section at all. */
+  hasWsl2Section: boolean
+  /**
+   * Why Helm will not rewrite this file, or null. A file it cannot read with
+   * confidence is reported and left alone - the user edits it by hand.
+   */
+  refusal: string | null
+}
+
+/** The same facts, plus the file they were read out of. */
+export interface WslNetworkingState extends WslConfigFacts {
+  /** `%USERPROFILE%\.wslconfig`, whether or not it is there. */
+  path: string
+  exists: boolean
+}
+
+/**
+ * A rewrite of the file's text, or the reason there is not one.
+ *
+ * `changed: false` is a success: the file already says what was asked for, and
+ * the caller has something to say about that rather than nothing.
+ */
+export type WslConfigEdit =
+  | { ok: true; text: string; changed: boolean }
+  | { ok: false; problem: string }
+
+/**
+ * The outcome of setting the mode, as the pane needs it.
+ *
+ * `backupPath` is the whole of "there is a way back": every change Helm makes
+ * to a file it does not own leaves a copy of what was there beside it, the same
+ * rule the config console's snapshot follows (`writeConfigFile`). Null with
+ * `ok: true` means nothing was written, so there was nothing to back up.
+ */
+export interface WslNetworkingWriteResult {
+  ok: boolean
+  /** The file as it reads after the attempt, written or not. */
+  state: WslNetworkingState
+  /** The copy taken immediately before the write, or null. */
+  backupPath: string | null
+  /** The file already said this, so nothing was written. */
+  unchanged: boolean
+  error: string | null
+}
+
+/**
  * A saved launch composition - the core object everything in Helm is organised
  * around (SPEC 3).
  *
@@ -1017,8 +1255,22 @@ export interface Profile {
   openingPrompt: string | null
   /** Launcher ordering; null means unpinned. */
   pinnedOrder: number | null
+  /**
+   * Where this profile's sessions run. Null means Windows.
+   *
+   * Nullable rather than defaulted in the type, because every profile saved
+   * before targets existed has no column value and "not recorded" and "chose
+   * Windows" are the same launch. The resolver is `launchTarget` below, so
+   * nothing else has to know that.
+   */
+  target: LaunchTarget | null
   createdAt: string
   updatedAt: string
+}
+
+/** A profile's target, with the pre-target default applied. */
+export function launchTarget(target: LaunchTarget | null | undefined): LaunchTarget {
+  return target ?? WINDOWS_TARGET
 }
 
 /** A profile before the store has given it an identity. */
@@ -1075,6 +1327,15 @@ export interface LaunchPlan {
    * launched would be a second parser of a string this file wrote.
    */
   claudeSessionId: string | null
+  /**
+   * Where this launch runs, with the pre-target default already applied.
+   *
+   * On the plan rather than left for the host to remember, because the host
+   * has to make two decisions from it - which program to spawn, and which
+   * `~/.claude` this session's rows belong to - and a host deriving that from
+   * the profile again is a second place for the answer to drift.
+   */
+  target: LaunchTarget
   /** Things the user should know that did not stop the launch. */
   warnings: string[]
 }

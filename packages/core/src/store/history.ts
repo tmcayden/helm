@@ -32,10 +32,35 @@ const DEFAULT_LIMIT = 2000
 // Indexing
 // ---------------------------------------------------------------------------
 
-export interface HistoryIndexInput {
+/**
+ * One `history.jsonl` and what has appeared in it since the last pass.
+ *
+ * There is more than one whenever a WSL distribution is installed. A session
+ * hosted in a distro is a `claude` process inside that distro writing to that
+ * distro's `~/.claude/history.jsonl`, which this process reaches over
+ * `\\wsl$\<distro>\...` but which is a different file with a cursor of its own.
+ */
+export interface HistorySource {
   /** The history file these lines came from; also the cursor's key. */
   file: string
   tail: HistoryTail
+}
+
+export interface HistoryIndexInput {
+  /**
+   * Every history file, indexed in one pass.
+   *
+   * One pass rather than one per file because the tables are shared and two of
+   * the steps are whole-table operations: `applyTranscripts` clears the
+   * transcript columns before re-marking, and `rebuildSessions` groups over
+   * every prompt. Run per file, each pass would undo the last one's transcript
+   * marks and the sessions from the other distro would flicker in and out of
+   * being resumable.
+   *
+   * Session ids are UUIDs, so rows from two homes coexist in the tables with no
+   * ambiguity and nothing has to record which home a session came from.
+   */
+  sources: readonly HistorySource[]
   /** Session ids that still have a transcript, keyed by lowercased id. */
   transcripts: Map<string, TranscriptFile>
   /**
@@ -67,15 +92,29 @@ export function historyCursor(store: Store, file: string): number {
  * across resets, re-reads and the same session appearing in two passes.
  */
 export function indexHistory(store: Store, input: HistoryIndexInput): HistorySummary {
-  const { file, tail, transcripts, directoryExists } = input
+  const { sources, transcripts, directoryExists } = input
+
+  /**
+   * A reset wipes everything, not just the file that reset.
+   *
+   * The prompt table does not record which file a row came from, and giving it
+   * a column would be a schema that has to be right about the past - rows
+   * written before the column existed would have no source and no migration
+   * could invent one. So the rare case pays for the common one: a file that
+   * shrank or vanished rebuilds the whole index, which is correct by
+   * construction because the caller re-reads every source from zero when this
+   * is true (see `createHistoryService`).
+   */
+  const reset = sources.some((source) => source.tail.reset)
+  const lines = sources.flatMap((source) => source.tail.lines)
 
   const apply = store.raw.transaction(() => {
-    if (tail.reset) {
+    if (reset) {
       store.raw.prepare('DELETE FROM history_prompts').run()
       store.raw.prepare('DELETE FROM history_sessions').run()
     }
 
-    if (tail.lines.length > 0) {
+    if (lines.length > 0) {
       const next = store.raw
         .prepare('SELECT COALESCE(MAX(seq), -1) + 1 AS seq FROM history_prompts')
         .get() as { seq: number }
@@ -84,7 +123,7 @@ export function indexHistory(store: Store, input: HistoryIndexInput): HistorySum
          VALUES (?, ?, ?, ?, ?, ?)`
       )
       let seq = next.seq
-      for (const line of tail.lines) {
+      for (const line of lines) {
         insert.run(
           seq++,
           line.sessionId,
@@ -100,7 +139,7 @@ export function indexHistory(store: Store, input: HistoryIndexInput): HistorySum
     // row unranked and no new prompt is coming to trigger a pass.
     const backfilled = rankUnranked(store)
 
-    if (tail.reset || tail.lines.length > 0 || backfilled > 0) {
+    if (reset || lines.length > 0 || backfilled > 0) {
       rebuildSessions(store)
     }
 
@@ -109,19 +148,26 @@ export function indexHistory(store: Store, input: HistoryIndexInput): HistorySum
     applyTranscripts(store, transcripts)
     applyProjectExistence(store, directoryExists)
 
-    store.raw
-      .prepare(
-        `INSERT INTO history_index (file, bytes, indexed_at)
-         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-         ON CONFLICT(file) DO UPDATE SET
-           bytes = excluded.bytes, indexed_at = excluded.indexed_at`
-      )
-      .run(file, tail.bytes)
+    const cursor = store.raw.prepare(
+      `INSERT INTO history_index (file, bytes, indexed_at)
+       VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+       ON CONFLICT(file) DO UPDATE SET
+         bytes = excluded.bytes, indexed_at = excluded.indexed_at`
+    )
+    for (const source of sources) cursor.run(source.file, source.tail.bytes)
   })
   apply()
 
-  const summary = historySummary(store, file)
-  return tail.error === undefined ? summary : { ...summary, error: tail.error }
+  const summary = historySummary(
+    store,
+    sources.map((source) => source.file)
+  )
+  // The first error, and named, because "the index could not be read" over two
+  // files is a sentence that does not say which one is missing.
+  const failed = sources.find((source) => source.tail.error !== undefined)
+  return failed === undefined
+    ? summary
+    : { ...summary, error: `${failed.file}: ${String(failed.tail.error)}` }
 }
 
 /**
@@ -508,7 +554,19 @@ export function readHistoryProjects(store: Store): HistoryProject[] {
   }))
 }
 
-export function historySummary(store: Store, file: string): HistorySummary {
+/**
+ * The totals, over every source at once.
+ *
+ * The aggregate has always been a scan of the whole table rather than a
+ * per-file sum, which is why two homes needed nothing here: a session is a
+ * session, and the launcher's list, its project grouping and its resumable
+ * count were already answering "what is in the index" rather than "what is in
+ * that file". Only the cursor is per file, and it is summed.
+ *
+ * `files` is primary-first: the head of it is what the UI names when it has
+ * room for one file, and the whole of it is what it lists when it does not.
+ */
+export function historySummary(store: Store, files: readonly string[]): HistorySummary {
   const totals = store.raw
     .prepare(
       `SELECT COUNT(*)                        AS sessions,
@@ -533,8 +591,9 @@ export function historySummary(store: Store, file: string): HistorySummary {
     projects: totals.projects,
     resumable: totals.resumable ?? 0,
     latestAt: totals.latest_at > 0 ? totals.latest_at : null,
-    historyFile: file,
-    indexedBytes: historyCursor(store, file)
+    historyFile: files[0] ?? '',
+    historyFiles: [...files],
+    indexedBytes: files.reduce((sum, file) => sum + historyCursor(store, file), 0)
   }
 }
 

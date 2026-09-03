@@ -429,7 +429,8 @@ export async function runHighlightChecks(
     agent: null,
     mcp: [],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   })
 
   const opened = await showConsole(win)

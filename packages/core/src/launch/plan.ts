@@ -1,6 +1,14 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import type { EffortLevel, LaunchPlan, PermissionMode, Profile } from '../types'
+import type {
+  EffortLevel,
+  LaunchPlan,
+  LaunchTarget,
+  PermissionMode,
+  Profile
+} from '../types'
+import { launchTarget } from '../types'
+import { toWslPath, wslDistroOf } from '../wsl/path'
 import {
   composeOverlayMemory,
   MEMORY_PREFIX,
@@ -58,6 +66,40 @@ export interface LaunchRequest {
    * a launch that fails outright rather than a session missing a feature.
    */
   sessionId?: string | null | undefined
+  /**
+   * Where the CLI runs. Omitted or null means Windows, which is what every
+   * caller meant before this existed.
+   */
+  target?: LaunchTarget | null | undefined
+}
+
+/**
+ * Every path on the argv, in the spelling the process that reads it uses.
+ *
+ * A Windows target is the identity. A WSL target translates, and a path that
+ * cannot be translated is **dropped with a warning** rather than passed
+ * through: `--add-dir C:\work` inside a distro is a directory that does not
+ * exist, and the CLI's own answer to that is worse than Helm's - it either
+ * fails the launch or silently grants nothing. See `toWslPath` for which paths
+ * are undecidable and why they are not guessed.
+ */
+function translatePaths(
+  paths: readonly string[],
+  target: LaunchTarget,
+  warnings: string[],
+  what: string
+): string[] {
+  if (target.kind === 'windows') return [...paths]
+  const out: string[] = []
+  for (const path of paths) {
+    const translated = toWslPath(path, { distro: target.distro })
+    if (translated === null) {
+      warnings.push(`${what} skipped - ${path} has no path inside ${target.distro}.`)
+      continue
+    }
+    out.push(translated)
+  }
+  return out
 }
 
 /** The launch shape of a stored profile. */
@@ -76,7 +118,8 @@ export function launchRequestFromProfile(
     permissionMode: profile.permissionMode,
     agent: profile.agent,
     openingPrompt: profile.openingPrompt,
-    shimRoot
+    shimRoot,
+    target: profile.target
   }
 }
 
@@ -101,7 +144,9 @@ export function buildLaunchArgs(
 ): string[] {
   const argv: string[] = []
 
-  const access = dedupePaths(req.access ?? [])
+  // The target decides whether these are this machine's paths or the distro's,
+  // and therefore whether `resolve` may touch them at all. See `dedupePaths`.
+  const access = dedupePaths(req.access ?? [], req.target)
   if (access.length > 0) argv.push('--add-dir', ...access)
 
   argv.push('-n', sanitizeSessionName(req.name))
@@ -138,12 +183,30 @@ export function buildLaunchArgs(
  * the normal case, since composing a repo's skills without granting its files
  * is rarely what anyone wants - would otherwise pass the same path twice.
  */
-function dedupePaths(paths: readonly string[]): string[] {
+function dedupePaths(paths: readonly string[], target?: LaunchTarget | null | undefined): string[] {
+  /*
+   * A distro path is **never** resolved, and this is not a tidiness rule.
+   *
+   * `resolve` is `path.win32.resolve` in this process, and it reads a leading
+   * `/` as "the root of the current drive" - so `resolve('/mnt/c/work')` on
+   * Windows returns `C:\mnt\c\work`, silently un-translating a path that had
+   * already been translated correctly. That is a `--add-dir` naming a
+   * directory that does not exist on either side of the boundary.
+   *
+   * It was invisible on Linux, where `resolve` leaves such a path alone, and
+   * the Windows test run is what caught it. A translated path is already
+   * absolute and already normalised, so there is nothing for `resolve` to do
+   * here anyway.
+   */
+  const translated = target != null && target.kind === 'wsl'
   const seen = new Set<string>()
   const out: string[] = []
   for (const path of paths) {
-    const abs = resolve(path)
-    const key = abs.toLowerCase()
+    const abs = translated ? path : resolve(path)
+    // Case-insensitively for Windows, whose paths are; exactly for a distro,
+    // whose paths are not - `/home/me/Work` and `/home/me/work` are two
+    // directories there, and folding them would drop one.
+    const key = translated ? abs : abs.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
     out.push(abs)
@@ -228,29 +291,94 @@ export function prepareLaunch(req: LaunchRequest): LaunchPlan {
     }
   }
 
+  /*
+   * The Windows→distro translation happens here and nowhere else.
+   *
+   * Deliberately after every write above: the shims, the composed memory file
+   * and the MCP document are all created by *this* process, which is a Windows
+   * process, so they are authored in Windows spelling and only the argv that
+   * names them changes. Translating earlier would mean writing files to paths
+   * this process cannot open.
+   */
+  /*
+   * A project that lives inside a distro launches inside that distro, whatever
+   * the profile says.
+   *
+   * Not a convenience. A Windows process cannot be spawned with a UNC working
+   * directory - `CreateProcess` answers ENOENT, measured 2026-09-02 - so a
+   * profile rooted at `\\wsl$\Ubuntu\...` on the Windows target does not
+   * degrade, it fails to start with an error naming neither WSL nor the root.
+   * Inferring is the difference between a working launch and an unexplainable
+   * one, so the path wins over the setting.
+   *
+   * A profile naming a *different* distro is the one case worth a sentence: it
+   * is a real contradiction rather than an unset field, and silently going with
+   * the path would hide a profile somebody has to fix.
+   */
+  const cwd = resolve(req.root)
+  const resident = wslDistroOf(cwd)
+  const chosen = launchTarget(req.target)
+  let target = chosen
+  if (resident !== null) {
+    if (chosen.kind === 'wsl' && chosen.distro.toLowerCase() !== resident.toLowerCase()) {
+      warnings.push(
+        `${cwd} is inside ${resident}, so this session runs there rather than in ${chosen.distro}.`
+      )
+    }
+    target = { kind: 'wsl', distro: resident }
+  }
+  const cwdForTarget = translatePaths([cwd], target, warnings, 'Working directory')[0] ?? null
+  if (cwdForTarget === null) {
+    // Everything else degrades to a warning; this one cannot. A session whose
+    // working directory is wrong resolves the wrong `.claude/` tree, which is
+    // the whole problem SPEC 1 exists to solve, and it would do it silently.
+    warnings.push(`${cwd} has no path inside ${targetName(target)}, so the launch has no cwd.`)
+  }
+
   const argv = buildLaunchArgs({
-    root: req.root,
+    root: cwdForTarget ?? cwd,
     name: req.name,
-    access,
+    // Carried through so `buildLaunchArgs` knows the paths below are already
+    // the distro's and must not be resolved again.
+    target,
+    access: translatePaths(access, target, warnings, 'Access directory'),
     model: req.model,
     effort: req.effort,
     permissionMode: req.permissionMode,
     agent: req.agent,
     openingPrompt: req.openingPrompt,
-    pluginDirs: shims.map((shim) => shim.dir),
-    memoryFile,
-    mcpConfigFile,
+    pluginDirs: translatePaths(
+      shims.map((shim) => shim.dir),
+      target,
+      warnings,
+      'Overlay'
+    ),
+    memoryFile: memoryFile === null ? null : (translatePaths([memoryFile], target, warnings, 'Project instructions')[0] ?? null),
+    mcpConfigFile:
+      mcpConfigFile === null
+        ? null
+        : (translatePaths([mcpConfigFile], target, warnings, "Helm's own tools")[0] ?? null),
     sessionId: req.sessionId
   })
 
   return {
-    cwd: resolve(req.root),
+    // The Windows path, always. This is what the pty is opened with and what
+    // the session row records, and `wsl.exe --cd` accepts a Windows path and
+    // translates it itself - measured 2026-09-02. The *argv* carries the
+    // translated spelling because the CLI inside the distro reads those.
+    cwd,
     name: sanitizeSessionName(req.name),
     argv,
     overlays: shims,
     memoryFile,
     mcpConfigFile,
     claudeSessionId: req.sessionId ?? null,
+    target,
     warnings
   }
+}
+
+/** What to call a target in a sentence a user reads. */
+function targetName(target: LaunchTarget): string {
+  return target.kind === 'wsl' ? target.distro : 'Windows'
 }

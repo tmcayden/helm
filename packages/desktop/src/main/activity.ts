@@ -2,13 +2,15 @@ import type { BrowserWindow } from 'electron'
 import {
   claudeHome as homeDir,
   joinSessionRegistry,
+  readForeignSessionRegistry,
   readSessionRegistry,
   sessionLabel,
   sessionRegistryDir,
   type LiveSession,
   type SessionActivityState,
   type SessionRegistryEntry,
-  type SessionsOverview
+  type SessionsOverview,
+  type WslHome
 } from '@helm/core'
 import { emit } from './ipc'
 import type { SessionHost } from './sessions'
@@ -61,6 +63,15 @@ export interface ActivityService {
    * dot without waiting out an interval and a finished one loses it at once.
    */
   refresh: () => void
+  /**
+   * Adds the WSL distributions' `~/.claude/sessions` to what the join looks in.
+   *
+   * A session Helm hosts in a distro registers there and nowhere else, so
+   * without this its tab's dot never lights. Separate from construction because
+   * finding the homes is a `wsl.exe` per distribution and the window must not
+   * wait on it.
+   */
+  useHomes: (homes: readonly WslHome[]) => void
   /** The raw records behind the current pass, for the check driver. */
   entries: () => SessionRegistryEntry[]
   stop: () => void
@@ -88,7 +99,7 @@ export interface ActivityDeps {
  * Dropped when the session ends, so a pid the machine goes on to reuse can
  * never be picked up by a tab that has already been closed.
  */
-type Pin = { pid: number; procStart: string | null }
+type Pin = { pid: number; procStart: string | null } | { file: string }
 
 export function createActivityService({
   sessions,
@@ -96,6 +107,29 @@ export function createActivityService({
   claudeHome
 }: ActivityDeps): ActivityService {
   const dir = sessionRegistryDir(claudeHome ?? homeDir())
+
+  /**
+   * The distributions' registries, added when the probe that finds them lands.
+   *
+   * A session Helm hosts inside a distro registers in *that* distro's
+   * `~/.claude/sessions`, so without these its tab has a dot that never lights
+   * and its status never reads anything but "no record yet".
+   *
+   * These are read through `readForeignSessionRegistry`, which does **not**
+   * filter by liveness, because the pid in the record belongs to the distro's
+   * kernel and probing it against this machine's process table would either
+   * miss a running session or match an unrelated Windows process and call a
+   * finished conversation live. The liveness instead comes from Helm itself:
+   * only records that join to a session Helm is hosting are used, and a hosted
+   * session is running because Helm holds the relay's pty. Anything that joins
+   * to nothing is dropped, so nothing stale can be painted from one.
+   *
+   * The visible consequence, and it is a real one: a `claude` somebody started
+   * in a distro's own terminal does not appear in the machine-wide listing.
+   * That listing is about processes this machine can be asked about, and this
+   * one cannot be - not for 0.15ms a pass, which is what it costs on NTFS.
+   */
+  let foreignDirs: readonly string[] = []
   const pins = new Map<number, Pin>()
   let current: SessionActivityState[] = []
   let entries: SessionRegistryEntry[] = []
@@ -138,6 +172,11 @@ export function createActivityService({
      */
     entries = readSessionRegistry(dir)
 
+    // Kept apart from `entries`, which is what the machine-wide listing walks:
+    // these are joinable but not listable, for the reason `foreignDirs` gives.
+    const foreign = foreignDirs.flatMap((where) => readForeignSessionRegistry(where))
+    const joinable = foreign.length === 0 ? entries : [...entries, ...foreign]
+
     const states: SessionActivityState[] = []
     const listed: LiveSession[] = []
     const seen = new Set<number>()
@@ -149,10 +188,23 @@ export function createActivityService({
     for (const record of live) {
       seen.add(record.id)
       const ptyPid = sessions.pid(record.id)
-      const found = joinSessionRegistry(entries, {
+      /*
+       * A session inside a distro is joined by conversation id and then by the
+       * record's file name, and never by a pid.
+       *
+       * Its pty is `wsl.exe`, so `ptyPid` is a Windows pid the distro's record
+       * has never heard of - offering it as a key could only ever produce a
+       * *wrong* match against one of this machine's own records, which is worse
+       * than no match. And the record's own pid is the distro's, which is why
+       * the pin is the file name instead; see `readForeignSessionRegistry`.
+       */
+      const inDistro = sessions.target(record.id)?.kind === 'wsl'
+      const pin = pins.get(record.id) ?? null
+      const found = joinSessionRegistry(joinable, {
         claudeSessionId: record.claudeSessionId,
-        ptyPid,
-        pinned: pins.get(record.id) ?? null
+        ptyPid: inDistro ? null : ptyPid,
+        pinned: pin !== null && !('file' in pin) ? pin : null,
+        pinnedFile: pin !== null && 'file' in pin ? pin.file : null
       })
 
       if (found === null) {
@@ -197,7 +249,10 @@ export function createActivityService({
       }
 
       claimed.add(found.file)
-      pins.set(record.id, { pid: found.pid, procStart: found.procStart })
+      pins.set(
+        record.id,
+        inDistro ? { file: found.file } : { pid: found.pid, procStart: found.procStart }
+      )
       states.push({
         id: record.id,
         activity: found.activity,
@@ -305,6 +360,14 @@ export function createActivityService({
     states: () => current,
     overview: () => listing,
     refresh,
+    useHomes(homes) {
+      const added = homes
+        .map((home) => sessionRegistryDir(home.claudeHome))
+        .filter((where) => !foreignDirs.some((held) => held.toLowerCase() === where.toLowerCase()))
+      if (added.length === 0) return
+      foreignDirs = [...foreignDirs, ...added]
+      refresh()
+    },
     entries: () => entries,
     stop: () => clearInterval(timer)
   }

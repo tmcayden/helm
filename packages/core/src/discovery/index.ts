@@ -1,5 +1,5 @@
 export { hasClaudeDir, readClaudeInventory } from './claude-inventory'
-export { isGitRepo, parseGitStatus, readGitBranch, readGitState, readGitStates } from './git'
+export { isGitRepo, parseGitStatus, readGitBranch, readGitState, readGitStates, repoCommand } from './git'
 export {
   claudeHome,
   directoryExists,

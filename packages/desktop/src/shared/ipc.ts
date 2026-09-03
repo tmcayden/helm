@@ -56,7 +56,13 @@ import type {
   ThemePreference,
   UsageSnapshot,
   WriteConfigRequest,
-  WriteConfigResult
+  WriteConfigResult,
+  WslDistro,
+  WslHome,
+  WslNetworkingMode,
+  WslNetworkingState,
+  WslNetworkingWriteResult,
+  WslProbe
 } from '@helm/core'
 import type { ProbeOp, TermCreateOptions } from './protocol'
 
@@ -165,6 +171,15 @@ export interface CreateHarnessOutcome {
    * rollback is claimed.
    */
   problems: string[]
+  /**
+   * The harness that was already there, when that is why nothing was written.
+   *
+   * `path` stays null - nothing was created - but this is **not** a refusal to
+   * report and stop at: the root has been added, so the folder is now in the
+   * launcher, and the dialog says that rather than showing an error over a
+   * harness the user cannot find. See `CreateHarnessResult.existing`.
+   */
+  existing: string | null
   /** The scan roots after the new harness was added to them. */
   roots: string[]
 }
@@ -554,7 +569,11 @@ export interface IpcRequests {
   /** Best guesses for a first-run scan root; may be empty. */
   'roots:suggest': { request: void; response: string[] }
   /** Native directory picker. Returns the roots after the addition. */
-  'roots:add': { request: void; response: string[] }
+  /**
+   * Adds folders the user picks. `startIn` opens the dialog somewhere specific -
+   * see `path:chooseDirectory`, which has the measurement behind it.
+   */
+  'roots:add': { request: { startIn?: string } | void; response: string[] }
   /** Adds a path already in hand - a suggestion accepted, a harness created. */
   'roots:accept': { request: { path: string }; response: string[] }
   'roots:remove': { request: { path: string }; response: string[] }
@@ -576,8 +595,94 @@ export interface IpcRequests {
   /** Stamps `firstRunCompletedAt`. The pane closing is a consequence of this. */
   'setup:complete': { request: void; response: AppSettings }
 
-  /** A directory chosen by the user, without doing anything with it yet. */
-  'path:chooseDirectory': { request: { title?: string }; response: { path: string | null } }
+  /**
+   * The WSL distributions on this machine, for the profile editor's target
+   * picker and the settings pane's WSL group.
+   *
+   * The listing alone, with no probe: enumerating is `wsl.exe -l -v` and costs
+   * one process, where asking each distro what `claude` it has starts every one
+   * of them. A form opening must not boot two distributions.
+   */
+  'wsl:distros': { request: void; response: WslDistro[] }
+  /**
+   * Each distribution's `~/.claude` and the home it sits in, as paths this
+   * machine can open.
+   *
+   * Free to ask: the answer is the memoised one the history, usage, activity
+   * and archive readers already made Helm find at start-up, so this awaits a
+   * promise rather than starting anything. Empty on a machine with no WSL, and
+   * empty when `CLAUDE_CONFIG_DIR` points Helm at one tree - see `wslHomes`.
+   *
+   * The folder pickers use it to open *inside* a distribution, which is the
+   * only route Helm has into one: Explorer's "Linux" entry is a shell namespace
+   * extension that no Electron dialog API can add, and the share root is not
+   * listable by the file APIs at all.
+   */
+  'wsl:homes': { request: void; response: WslHome[] }
+  /**
+   * What one distro has - its `claude`, that CLI's version, and whether it can
+   * reach Helm's endpoint. One distro at a time because it is a question asked
+   * about the row somebody is looking at, and because the answer starts the
+   * distro if it is not running.
+   */
+  'wsl:probe': { request: { distro: string; refresh?: boolean }; response: WslProbe }
+
+  /**
+   * What `%USERPROFILE%\.wslconfig` says about `networkingMode`.
+   *
+   * A read of one small file, so it is asked whenever the settings pane opens -
+   * unlike `wsl:probe`, which starts a distribution. It answers only what the
+   * file says: whether a distro can reach the endpoint *now* is `wsl:probe`'s
+   * `endpointReachable`, and the two are deliberately separate channels because
+   * they are separate facts. A file that has been set to `mirrored` while WSL
+   * has not restarted yet is the state a user most needs to see.
+   */
+  'wsl:networking': { request: void; response: WslNetworkingState }
+  /**
+   * Sets `networkingMode` under `[wsl2]`, in the user's own file.
+   *
+   * The one write Helm makes outside its own data directory and a `.claude`
+   * tree, and it carries the same guarantee the config console's does: a copy
+   * of the previous bytes goes down first and a failure to take it aborts the
+   * write. A file too odd to parse with confidence is refused rather than
+   * rewritten, and comes back in `error` for the pane to print.
+   *
+   * **It never restarts WSL.** The setting takes effect at the next WSL start,
+   * and `wsl:shutdown` is a separate channel for that reason.
+   */
+  'wsl:setNetworking': {
+    request: { mode: WslNetworkingMode }
+    response: WslNetworkingWriteResult
+  }
+  /**
+   * `wsl --shutdown`, which ends **every** WSL process on this machine.
+   *
+   * Its own channel, invoked from nothing but a confirmation that names what it
+   * terminates - other people's editors, servers and builds inside any
+   * distribution, and any Claude Code session running in one, this Helm's own
+   * WSL-target sessions included. Nothing in the main process calls it as a
+   * side effect of anything, which is the rule the separate channel exists to
+   * make structural rather than remembered.
+   */
+  'wsl:shutdown': { request: void; response: { ok: boolean; error: string | null } }
+
+  /**
+   * A directory chosen by the user, without doing anything with it yet.
+   *
+   * `startIn` is where the dialog opens. It exists for one reason: **Windows'
+   * file dialog has no route into a WSL distribution that Helm can add.** The
+   * "Linux" entry beside "This PC" in Explorer is a shell namespace extension,
+   * not a listable share - measured 2026-09-03, `readdirSync('\\\\wsl$\\')` and
+   * `readdirSync('\\\\wsl.localhost\\')` both answer ENOENT while
+   * `\\wsl.localhost\Ubuntu\home` is an ordinary directory - and Electron
+   * exposes no way to add a place to the dialog's sidebar. So the way to put a
+   * user inside a distribution is to open the dialog *there*, which Helm can do
+   * because it already knows every distro's home.
+   */
+  'path:chooseDirectory': {
+    request: { title?: string; startIn?: string }
+    response: { path: string | null }
+  }
   /**
    * The same for a program. Used by the terminal settings' "Choose…" row, for
    * a shell that is installed somewhere `where.exe` does not look.
@@ -988,7 +1093,15 @@ export interface IpcRequests {
   /** `claude mcp list`, which health-checks every server, so it is slow. */
   'config:mcpList': { request: { cwd: string }; response: McpResult }
 
-  'config:doctor': { request: void; response: DoctorReport }
+  /**
+   * `claude doctor` for the scope on screen.
+   *
+   * Carries a `cwd` because which Claude Code is being asked about is a
+   * property of the path: a scope inside a WSL distribution is served by that
+   * distribution's CLI, and a health report about this machine's would be a
+   * report about an installation those sessions never run.
+   */
+  'config:doctor': { request: { cwd: string }; response: DoctorReport }
 
   /**
    * Claude Code's cached answer about plan limits, read out of
@@ -1493,6 +1606,12 @@ export const REQUEST_CHANNELS = Object.keys({
   'setup:status': true,
   'setup:locateClaude': true,
   'setup:complete': true,
+  'wsl:distros': true,
+  'wsl:homes': true,
+  'wsl:probe': true,
+  'wsl:networking': true,
+  'wsl:setNetworking': true,
+  'wsl:shutdown': true,
   'path:chooseDirectory': true,
   'path:chooseFile': true,
   'harness:create': true,

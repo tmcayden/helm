@@ -41,6 +41,7 @@ const draft = (overrides: Partial<ProfileDraft> = {}): ProfileDraft => ({
   mcp: ['clickup'],
   openingPrompt: '/recap',
   pinnedOrder: null,
+  target: null,
   ...overrides
 })
 

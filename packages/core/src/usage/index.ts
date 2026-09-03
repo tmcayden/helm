@@ -4,7 +4,9 @@
 // root. Same reasoning as `config/validate.ts`.
 export {
   claudeConfigFileIn,
+  freshestUsage,
   readUsage,
+  readUsageAcross,
   usageFileState,
   type UsageFileState
 } from './read'
@@ -12,7 +14,11 @@ export {
   parseUsageLine,
   readUsageTail,
   scanUsageTranscripts,
+  usageScanUnits,
+  walkUsageTranscripts,
+  walkUsageTranscriptsUntil,
   type TranscriptStat,
+  type UsageScanUnit,
   type UsageRow,
   type UsageTail
 } from './transcripts'

@@ -52,6 +52,7 @@ import { createArchiveService } from './archive'
 import { createHistoryService } from './history'
 import { createPullsService } from './pulls'
 import { createUsageService } from './usage'
+import { wslHomes } from './wsl'
 import { maybeCheckForUpdate } from './update'
 import { createSessionHost, type Confirm, type SessionObserver } from './sessions'
 import { createActivityService } from './activity'
@@ -498,6 +499,7 @@ function startApp(options: AppOptions = {}): void {
     onChange: (snapshot) => emit(win, 'usage:changed', snapshot)
   })
 
+
   /**
    * The projects the PR sweep considers, read through a function.
    *
@@ -600,6 +602,49 @@ function startApp(options: AppOptions = {}): void {
     ...(options.claudeHome !== undefined ? { claudeHome: options.claudeHome } : {})
   })
   sessions.onChanged(() => activity.refresh())
+
+  /*
+   * The WSL distributions' `~/.claude` directories, handed to the four things
+   * that read one, once the probe that finds them lands.
+   *
+   * A distro keeps a `.claude` of its own and a session hosted there uses only
+   * that one: its prompts go in that `history.jsonl`, its transcript under that
+   * `projects/`, its live status in that `sessions/`. So all four widen
+   * together or the app is inconsistent with itself - a session in the history
+   * whose tokens are not in the spend, or a tab whose dot never lights.
+   *
+   * The archive is the fourth and the one with a deadline on it: a transcript
+   * Claude Code reaps is gone, so a home the archive's own sweep cannot see is
+   * not a stale figure but a conversation lost. Its incremental half already
+   * rode `history`'s widened walk; `useHomes` is what widens the sweep.
+   *
+   * Off the startup path on purpose. It is a `wsl.exe` per distribution, ~200ms
+   * each cold, and all four are useful before it answers: they hold this
+   * machine's, which is what they held before any of this existed. When it
+   * answers they widen, and the window gets the ordinary change events.
+   *
+   * Not done at all when `--claude-home` points somewhere: a check pointed at a
+   * fixture tree must not reach into the developer's real distributions. The
+   * other way of pointing - the real `CLAUDE_CONFIG_DIR`, which is how
+   * `transcript-check` does it - is refused inside `wslHomes` itself, so it
+   * holds for the three other callers too. See that function for what it cost
+   * to learn that this gate covered only one of the two.
+   */
+  if (options.claudeHome === undefined) {
+    void wslHomes()
+      .then((found) => {
+        if (found.length === 0) return
+        history.useHomes(found)
+        usage.useHomes(found)
+        activity.useHomes(found)
+        archive.useHomes(found)
+        console.log(`reading ${found.map((home) => home.distro).join(', ')} alongside this machine`)
+      })
+      .catch((err: unknown) => {
+        // No WSL here is the ordinary answer, not a failure.
+        console.warn(`WSL homes could not be read: ${String(err)}`)
+      })
+  }
 
   /*
    * What each hosted session is *holding* - its process tree and its ports.

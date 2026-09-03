@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { claudeConfigFileIn, readUsage } from './read'
+import { claudeConfigFileIn, freshestUsage, readUsage, readUsageAcross } from './read'
 import { nextUsageMode, parseUsage, usageView, USAGE_STALE_AFTER_MS } from './shape'
 
 /**
@@ -431,5 +431,117 @@ describe('readUsage', () => {
     expect(snapshot.problem).toBeNull()
     expect(snapshot.limits).toHaveLength(3)
     expect(snapshot.file).toBe(file)
+  })
+})
+
+/**
+ * The rule that decides *which* install's reading is shown, once there is more
+ * than one - this machine's `~/.claude.json` and one per WSL distribution. They
+ * cache the same account's limits, so the question is never how to combine them
+ * and always which is the most recent description of the one thing they
+ * describe.
+ *
+ * Nothing here needs WSL installed, and that is deliberate rather than
+ * convenient: the mechanism is a second path, so a temp directory standing in
+ * for a distro's home exercises the same code the `\wsl$\` one does.
+ */
+describe('freshestUsage', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'helm-usage-homes-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  /** A `.claude.json` in its own subdirectory, as a home's would be. */
+  function homeFile(name: string, fetchedAtMs: number | null): string {
+    const home = join(dir, name)
+    mkdirSync(home, { recursive: true })
+    const file = join(home, '.claude.json')
+    writeFileSync(file, JSON.stringify(claudeJson({ fetchedAtMs })))
+    return file
+  }
+
+  it('takes the most recently fetched reading, whichever home it is in', () => {
+    const windows = homeFile('windows', FETCHED - 60 * 60_000)
+    const distro = homeFile('ubuntu', FETCHED)
+
+    const snapshot = readUsageAcross([windows, distro])
+
+    expect(snapshot.file).toBe(distro)
+    expect(snapshot.fetchedAtMs).toBe(FETCHED)
+  })
+
+  it('keeps this machine on a tie, because the caller passes it first', () => {
+    // Two files stamped the same millisecond are the same reading, and the one
+    // that needs no sentence beside it in the tooltip is the local one.
+    const windows = homeFile('windows', FETCHED)
+    const distro = homeFile('ubuntu', FETCHED)
+
+    expect(readUsageAcross([windows, distro]).file).toBe(windows)
+  })
+
+  it('paints nothing, with the first candidate reason, when no home has one', () => {
+    // The all-absent case: the surface must degrade exactly as it did when
+    // there was one file, and the reason must name a file somebody can look at
+    // rather than being invented from the fact that several were tried.
+    const windows = join(dir, 'windows', '.claude.json')
+    const distro = join(dir, 'ubuntu', '.claude.json')
+
+    const snapshot = readUsageAcross([windows, distro])
+
+    expect(snapshot.limits).toEqual([])
+    expect(snapshot.problem?.kind).toBe('no-file')
+    expect(snapshot.file).toBe(windows)
+  })
+
+  it('never lets an absent or unreadable file outrank a real reading', () => {
+    // Order-independent, which is the point: a problem snapshot carries no
+    // `fetchedAtMs`, so it cannot win from either end of the list.
+    const missing = join(dir, 'gone', '.claude.json')
+    const broken = join(dir, 'broken.json')
+    writeFileSync(broken, '{"cachedUsageUtilization": {"fetched')
+    const real = homeFile('ubuntu', FETCHED)
+
+    expect(readUsageAcross([missing, broken, real]).file).toBe(real)
+    expect(readUsageAcross([real, missing, broken]).file).toBe(real)
+  })
+
+  it('ranks by fetch time and not by which reading would paint a number', () => {
+    // Both of these are past `USAGE_STALE_AFTER_MS`, and picking between them
+    // by which one `usageView` would let through is choosing the answer first
+    // and the evidence after. The fresher file wins on its timestamp alone, and
+    // what may be painted from it stays `usageView`'s decision - here a floor,
+    // because that is what a stale reading of a live window is.
+    const older = homeFile('windows', NOW - 90 * 60_000)
+    const stale = homeFile('ubuntu', NOW - 35 * 60_000)
+
+    const snapshot = readUsageAcross([older, stale])
+
+    expect(snapshot.file).toBe(stale)
+    const view = usageView(snapshot, NOW)
+    expect(view.atLeast).toBe(true)
+    expect(view.ageMs).toBe(35 * 60_000)
+  })
+
+  it('is readUsage when there is one home, which is the ordinary machine', () => {
+    const only = homeFile('windows', FETCHED)
+
+    expect(readUsageAcross([only])).toEqual(readUsage(only))
+  })
+
+  it('reports rather than throws when handed no candidates at all', () => {
+    expect(readUsageAcross([]).problem?.kind).toBe('no-file')
+  })
+
+  it('ranks snapshots it is handed, so the rule is testable without files', () => {
+    const early = parseUsage(claudeJson({ fetchedAtMs: FETCHED - 1 }), 'early.json')
+    const late = parseUsage(claudeJson({ fetchedAtMs: FETCHED }), 'late.json')
+
+    expect(freshestUsage([early, late]).file).toBe('late.json')
+    expect(freshestUsage([late, early]).file).toBe('late.json')
   })
 })

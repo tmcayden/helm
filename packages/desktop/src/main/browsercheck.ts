@@ -2176,7 +2176,8 @@ function plantArtifact(ctx: CheckContext, dataDir: string): { root: string; toke
     agent: null,
     mcp: [],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   })
   return { root, token }
 }

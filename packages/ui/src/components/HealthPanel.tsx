@@ -10,6 +10,17 @@ export interface HealthPanelProps {
   onRun: () => void
   /** `claude --version` as the app read it at startup, or null if not found. */
   claudeVersion: string | null
+  /**
+   * The distribution whose Claude Code this panel is about, or null for this
+   * machine's.
+   *
+   * Named on screen because the answer is about an *installation* and a machine
+   * with WSL has more than one. It also decides whether `claudeVersion` is
+   * printed: that string is this machine's CLI, read at startup, and putting it
+   * beside a report from a distribution's CLI would attribute one
+   * installation's version to another's health.
+   */
+  distro: string | null
 }
 
 /**
@@ -25,7 +36,8 @@ export function HealthPanel({
   report,
   running,
   onRun,
-  claudeVersion
+  claudeVersion,
+  distro
 }: HealthPanelProps): JSX.Element {
   return (
     <div className="h-full overflow-y-auto">
@@ -35,14 +47,22 @@ export function HealthPanel({
             <h2 className="text-[17px] leading-snug font-medium tracking-tight text-fg">
               Installation health
             </h2>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
+            <p className="mt-1.5 text-[12px] leading-relaxed text-fg-muted" data-doctor-target={distro ?? ''}>
               <code className="font-mono">claude doctor</code>, run against the same CLI Helm
               launches sessions with
-              {claudeVersion !== null && (
+              {distro !== null ? (
                 <>
                   {' '}
-                  &mdash; <span className="font-mono text-[11px]">{claudeVersion}</span>
+                  in this scope &mdash; the one inside{' '}
+                  <span className="font-mono text-[11px]">{distro}</span>, not this machine&rsquo;s
                 </>
+              ) : (
+                claudeVersion !== null && (
+                  <>
+                    {' '}
+                    &mdash; <span className="font-mono text-[11px]">{claudeVersion}</span>
+                  </>
+                )
               )}
               .
             </p>

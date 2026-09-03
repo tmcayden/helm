@@ -6,7 +6,9 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -213,6 +215,69 @@ describe('syncOverlay', () => {
 
     writeFileSync(join(project, '.claude', 'skills', 'think', 'SKILL.md'), '# edited\n')
     expect(readFileSync(join(shim.dir, 'skills', 'think', 'SKILL.md'), 'utf8')).toBe('# edited\n')
+  })
+})
+
+/**
+ * Junctions that lead nowhere, which is what a UNC target produces.
+ *
+ * Measured 2026-09-02 on Windows 11: `symlinkSync(target, path, 'junction')`
+ * with a `\\wsl$\...` target **succeeds** and the link then resolves to
+ * nothing - `existsSync`, `lstat`, `realpath` and `readdir` all say it is not
+ * there. Every project inside a WSL distribution has such a path, so this was
+ * reached by an ordinary overlay rather than by anything exotic.
+ *
+ * Windows-only: on any other platform `symlinkSync` ignores the `'junction'`
+ * type and makes an ordinary symlink, which fails differently and is not the
+ * thing being pinned here.
+ */
+describe.skipIf(process.platform !== 'win32')('a junction the filesystem will not resolve', () => {
+  /** No distro of this name, so the test needs no WSL to run. */
+  const UNREACHABLE = '\\\\wsl$\\HelmNoSuchDistro\\home\\me\\work'
+
+  it('is still the premise: Windows creates one without complaining', () => {
+    // If this ever starts throwing, `link`'s existence check has become
+    // unnecessary rather than wrong - and this is what would say so.
+    const path = join(shimRoot, 'premise')
+    mkdirSync(shimRoot, { recursive: true })
+    symlinkSync(UNREACHABLE, path, 'junction')
+    expect(existsSync(path)).toBe(false)
+    rmdirSync(path)
+  })
+
+  it('is never reported as a linked shim', () => {
+    // Before the fix this returned `mode: 'junction'` with `linked: ['skills']`
+    // and a dead link behind it, so the session got a `--plugin-dir` that
+    // composed nothing and said nothing. Throwing is the right answer for a
+    // source that genuinely cannot be read: the copy fallback has nothing to
+    // copy from.
+    expect(() =>
+      syncOverlay({
+        name: 'gone',
+        projectPath: UNREACHABLE,
+        dir: join(shimRoot, 'overlay-gone'),
+        links: ['skills'],
+        claudeMdPath: null
+      })
+    ).toThrow()
+
+    expect(existsSync(join(shimRoot, 'overlay-gone', 'skills'))).toBe(false)
+  })
+
+  it('does not wedge the sweep when an older build left one behind', () => {
+    // `lstat` on a dead link throws, so it used to be skipped - and then the
+    // recursive delete found an entry it could not remove and failed with
+    // ENOTEMPTY, taking every later shim's cleanup with it.
+    const project = makeProject('acme', { skills: ['think'] })
+    syncOverlay(planOverlays([project], shimRoot)[0]!)
+    symlinkSync(UNREACHABLE, join(shimRoot, 'overlay-acme', 'stale'), 'junction')
+
+    expect(cleanStaleShims(shimRoot, [], rebooted())).toEqual([join(shimRoot, 'overlay-acme')])
+    expect(existsSync(join(shimRoot, 'overlay-acme'))).toBe(false)
+    // And the source repo is untouched, which is the rule the sweep exists for.
+    expect(readFileSync(join(project, '.claude', 'skills', 'think', 'SKILL.md'), 'utf8')).toBe(
+      '# think\n'
+    )
   })
 })
 

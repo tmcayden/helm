@@ -77,8 +77,7 @@ function index(
 ): ReturnType<typeof indexHistory> {
   const missing = new Set((opts.missingProjects ?? []).map((p) => p.toLowerCase()))
   return indexHistory(store, {
-    file: HISTORY,
-    tail: tail(prompts, opts.tail),
+    sources: [{ file: HISTORY, tail: tail(prompts, opts.tail) }],
     transcripts: opts.transcripts ?? new Map(),
     directoryExists: (path) => !missing.has(path.toLowerCase())
   })
@@ -168,7 +167,7 @@ describe('indexHistory', () => {
     // Nothing new in the history file; the transcript is simply gone.
     index([], { transcripts: new Map() })
     expect(readHistorySession(store, 'a')?.transcriptFile).toBeNull()
-    expect(historySummary(store, HISTORY).resumable).toBe(0)
+    expect(historySummary(store, [HISTORY]).resumable).toBe(0)
   })
 
   it('matches a transcript to its session whatever case the id was written in', () => {
@@ -192,8 +191,7 @@ describe('indexHistory', () => {
   it('is idempotent: re-running a pass changes nothing', () => {
     const first = index([{ sessionId: 'a', text: 'x' }], { transcripts: transcripts('a') })
     const again = indexHistory(store, {
-      file: HISTORY,
-      tail: tail([], { bytes: first.indexedBytes }),
+      sources: [{ file: HISTORY, tail: tail([], { bytes: first.indexedBytes }) }],
       transcripts: transcripts('a'),
       directoryExists: () => true
     })
@@ -204,8 +202,89 @@ describe('indexHistory', () => {
     index([{ sessionId: 'a', text: 'x' }])
     const summary = index([], { tail: { error: 'EBUSY' } })
 
-    expect(summary.error).toBe('EBUSY')
+    // Named, because with a distro's history file indexed beside this
+    // machine's, "EBUSY" alone does not say which of them could not be read.
+    expect(summary.error).toBe(`${HISTORY}: EBUSY`)
     expect(summary.sessions).toBe(1)
+  })
+
+  describe('more than one history file', () => {
+    const WSL = '\\\\wsl$\\Ubuntu\\home\\me\\.claude\\history.jsonl'
+
+    /** Two homes in one pass, which is how the service always calls it. */
+    function both(
+      windows: Prompt[],
+      wsl: Prompt[],
+      opts: { transcripts?: Map<string, TranscriptFile> } = {}
+    ): ReturnType<typeof indexHistory> {
+      return indexHistory(store, {
+        sources: [
+          { file: HISTORY, tail: tail(windows, { bytes: 100 }) },
+          { file: WSL, tail: tail(wsl, { bytes: 250 }) }
+        ],
+        transcripts: opts.transcripts ?? new Map(),
+        directoryExists: () => true
+      })
+    }
+
+    it('counts sessions from both homes as one index', () => {
+      const summary = both(
+        [{ sessionId: 'win', text: 'on this machine' }],
+        [{ sessionId: 'nix', text: 'in the distro', project: '\\\\wsl$\\Ubuntu\\home\\me\\work' }]
+      )
+
+      expect(summary.sessions).toBe(2)
+      expect(summary.projects).toBe(2)
+      expect(readHistorySessions(store).sessions.map((s) => s.sessionId).sort()).toEqual([
+        'nix',
+        'win'
+      ])
+    })
+
+    it('keeps a cursor per file and sums them for the version key', () => {
+      const summary = both([{ sessionId: 'win', text: 'x' }], [{ sessionId: 'nix', text: 'y' }])
+
+      expect(historyCursor(store, HISTORY)).toBe(100)
+      expect(historyCursor(store, WSL)).toBe(250)
+      expect(summary.indexedBytes).toBe(350)
+    })
+
+    it('names this machine as the primary and still lists every file', () => {
+      const summary = both([], [])
+      expect(summary.historyFile).toBe(HISTORY)
+      expect(summary.historyFiles).toEqual([HISTORY, WSL])
+    })
+
+    it('marks a distro session resumable from its own transcript', () => {
+      // The transcript lives under the distro's `~/.claude/projects`, which is
+      // a `\\wsl$\` path here and an ordinary file to everything downstream.
+      const summary = both([], [{ sessionId: 'nix', text: 'x' }], {
+        transcripts: transcripts('nix')
+      })
+      expect(summary.resumable).toBe(1)
+      expect(canResume(readHistorySession(store, 'nix')!)).toBe(true)
+    })
+
+    it('a reset in one file empties the index for both', () => {
+      // The rows do not record which file they came from, so a partial wipe is
+      // not expressible - which is why the service re-reads every source from
+      // zero whenever it sees one, and why this pass supplies both in full.
+      both([{ sessionId: 'win', text: 'old' }], [{ sessionId: 'nix', text: 'old' }])
+
+      indexHistory(store, {
+        sources: [
+          { file: HISTORY, tail: tail([{ sessionId: 'win2', text: 'new' }], { reset: true }) },
+          { file: WSL, tail: tail([{ sessionId: 'nix2', text: 'new' }], { bytes: 250 }) }
+        ],
+        transcripts: new Map(),
+        directoryExists: () => true
+      })
+
+      expect(readHistorySessions(store).sessions.map((s) => s.sessionId).sort()).toEqual([
+        'nix2',
+        'win2'
+      ])
+    })
   })
 })
 
@@ -433,7 +512,7 @@ describe('historySummary', () => {
       { transcripts: transcripts('a'), tail: { bytes: 900 } }
     )
 
-    expect(historySummary(store, HISTORY)).toMatchObject({
+    expect(historySummary(store, [HISTORY])).toMatchObject({
       sessions: 2,
       prompts: 3,
       projects: 2,
@@ -444,7 +523,7 @@ describe('historySummary', () => {
   })
 
   it('is empty rather than broken before anything is indexed', () => {
-    expect(historySummary(store, HISTORY)).toMatchObject({
+    expect(historySummary(store, [HISTORY])).toMatchObject({
       sessions: 0,
       prompts: 0,
       resumable: 0,

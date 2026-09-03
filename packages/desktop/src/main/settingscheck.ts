@@ -1,7 +1,15 @@
 import { app, nativeTheme, type BrowserWindow } from 'electron'
 import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { readSettings, type AppSettings } from '@helm/core'
 import {
@@ -66,7 +74,11 @@ const GROUPS = [
   'validation',
   'terminal',
   'content',
-  'github'
+  'github',
+  // Last on purpose. It swaps `USERPROFILE` for the length of the group, and
+  // on Windows `os.homedir()` is derived from that variable - so anything that
+  // reads a home while it is swapped would read the fixture. See the group.
+  'wsl'
 ] as const
 type Group = (typeof GROUPS)[number]
 
@@ -1422,6 +1434,9 @@ export async function runSettingsChecks(
       'content',
       'browser',
       'sessions',
+      // `wsl` sits with those two because what it changes is whether either
+      // family of tools reaches a session hosted in a distribution at all.
+      'wsl',
       'updates',
       'terminal',
       'archive',
@@ -5142,6 +5157,527 @@ export async function runSettingsChecks(
         'two flags reach the argv, and that checkout mode refuses a dirty tree.'
       ]
     })
+  }
+
+  // -------------------------------------------------------------------------
+  // S-23..S-26: the WSL group
+  // -------------------------------------------------------------------------
+  //
+  // The one group in this pane that does not write a settings row. What it
+  // changes is `%USERPROFILE%\.wslconfig` - a file Helm does not own, that
+  // applies to every distribution and every WSL process on the machine - so
+  // there is no database read to put beside the UI here. The independent read
+  // is the file itself, and this driver does all of it with `readFileSync`.
+  //
+  // **It is aimed at a fixture profile, not at the user's.** `wslConfigPath()`
+  // resolves `USERPROFILE` at call time, so swapping that variable points the
+  // real channel, the real editor and the real backup at a directory this
+  // driver made - which means honouring the variable is something the run
+  // exercises rather than something a hook simulates, the same posture
+  // `transcript-check` takes with `CLAUDE_CONFIG_DIR`. Nothing here can write
+  // to the developer's own `.wslconfig`, and a group that dies half way leaves
+  // the swap in place only until the process exits.
+  //
+  // The swap is why this group runs last: on Windows `os.homedir()` *is*
+  // `USERPROFILE`, so anything asking for a home while it is swapped - the
+  // config console's scopes, the history index - would be handed the fixture.
+  // Nothing is driven between the swap and the restore except this group.
+  if (run('wsl')) {
+    const profileDir = join(fixtures.dir, 'wsl profile')
+    const configFile = join(profileDir, '.wslconfig')
+    const realProfile = process.env['USERPROFILE']
+
+    /** The fixture's bytes, or null for a file that is not there. */
+    const onDisk = (): string | null => {
+      try {
+        return readFileSync(configFile, 'utf8')
+      } catch {
+        return null
+      }
+    }
+    /** The copies Helm has taken beside it. */
+    const backups = (): string[] =>
+      existsSync(profileDir)
+        ? readdirSync(profileDir)
+            .filter((name) => name.endsWith('.helm.bak'))
+            .sort()
+        : []
+
+    /**
+     * The pane, remounted.
+     *
+     * `.wslconfig` is read when the group mounts and again after every write,
+     * and nothing watches the file - deliberately, see `useWslNetworking`. So
+     * a fixture planted underneath an open pane is a fixture the pane has not
+     * read, and remounting is what makes the next assertion a claim about the
+     * file rather than about a stale render.
+     *
+     * Done by putting another pane on screen rather than by closing the tab.
+     * The pane is a conditional render on the *active* pane, so switching away
+     * unmounts it and the hook runs its read again on the way back - whereas
+     * the close button leaves a tab strip that may still be showing the pane
+     * this is trying to get rid of. Written the other way first, and S-23
+     * caught it exactly as it should have: the state and the mode agreed with
+     * the fixture by coincidence - both files were absent - while the path on
+     * screen was still `C:\Users\<me>\.wslconfig`, which is the one read that
+     * could tell a remount from a stale render.
+     */
+    const remount = async (): Promise<boolean> => {
+      await click(win, '[data-open-history]')
+      await pollJs(win, `document.querySelector('[data-settings-pane]') === null`, 10_000)
+      const opened = await openSettings(win)
+      // The state attribute is `reading` until the channel answers, so waiting
+      // for the element is not enough - waiting for it to stop reading is.
+      await pollJs(
+        win,
+        `document.querySelector('[data-settings-wsl-state]')?.dataset.settingsWslState !== 'reading'`,
+        10_000
+      )
+      return opened
+    }
+
+    const paneState = (): Promise<string | null> =>
+      attr(win, '[data-settings-wsl-state]', 'data-settings-wsl-state')
+
+    rmSync(profileDir, { recursive: true, force: true })
+    mkdirSync(profileDir, { recursive: true })
+    process.env['USERPROFILE'] = profileDir
+
+    try {
+      // ---------------------------------------------------------------------
+      // S-23: what the file says, including when there is no file
+      // ---------------------------------------------------------------------
+      //
+      // The absent file is the interesting half and it is the state of the
+      // machine this was written on. Absent must read as "no mode set" and
+      // never as `nat`: which mode WSL defaults to is a fact about the WSL
+      // build, and printing the default as though the file said it would be
+      // Helm inventing a line nobody wrote.
+      await remount()
+      const absentState = await paneState()
+      const absentMode = await attr(win, '[data-settings-wsl-mode]', 'data-settings-wsl-mode')
+      const absentPath = (await text(win, '[data-settings-wsl-file]')).trim()
+      const absentOnDisk = onDisk()
+      const offerWhenAbsent = await attr(win, '[data-settings-wsl-set]', 'data-settings-wsl-set')
+      const offerLive = await disabled(win, '[data-settings-wsl-set]')
+
+      checks.push({
+        id: 'S-23',
+        criterion: 'The pane states what `.wslconfig` says, and says nothing the file does not',
+        title: 'An absent .wslconfig reads as no mode set, names the path, and offers the change',
+        ok:
+          absentOnDisk === null &&
+          absentState === 'not-mirrored' &&
+          absentMode === '' &&
+          absentPath === configFile &&
+          offerWhenAbsent === 'mirrored' &&
+          offerLive === false,
+        detail: {
+          configFile,
+          fileOnDisk: absentOnDisk,
+          paneState: absentState,
+          paneMode: absentMode,
+          panePath: absentPath,
+          buttonOffers: offerWhenAbsent,
+          buttonDisabled: offerLive
+        },
+        notes: [
+          'The path on screen is compared with the path this driver put in',
+          '`USERPROFILE`, so it is evidence that the pane is reading the file the',
+          'channel would write - not two independently plausible strings.',
+          'The mode attribute must be empty rather than `nat`. A pane that filled',
+          'in the platform default would be indistinguishable from a file that',
+          'set it, which is the one thing a user reads this row to find out.',
+          'The button is live for an absent file: there is nothing to lose, and',
+          'the way back from creating the file is deleting it.'
+        ]
+      })
+
+      // ---------------------------------------------------------------------
+      // S-24: the write - what it puts in, what it keeps, what it copies first
+      // ---------------------------------------------------------------------
+      //
+      // Two writes, and the second is the one that matters. The first is into
+      // nothing, which cannot say anything about preservation; so a file with
+      // comments, an inline comment, another section, CRLF line endings and
+      // `networkingMode=nat` already in it is planted underneath, and every
+      // line of it except the one under test has to come out byte-identical.
+      const createClicked = await clickByData(win, 'settings-wsl-set', 'mirrored')
+      await pollJs(
+        win,
+        `document.querySelector('[data-settings-wsl-state]')?.dataset.settingsWslState === 'mirrored'`,
+        15_000
+      )
+      const createdText = onDisk()
+      const createdBackups = backups()
+      const createdNotice = (await text(win, '[data-settings-wsl-notice]')).trim()
+
+      const PLANTED = [
+        '# a comment somebody wrote',
+        '[wsl2]',
+        'memory=8GB   # and an inline one',
+        'processors=4',
+        'networkingMode=nat',
+        '',
+        '[experimental]',
+        'autoMemoryReclaim=gradual',
+        ''
+      ].join('\r\n')
+      writeFileSync(configFile, PLANTED, 'utf8')
+      for (const name of backups()) rmSync(join(profileDir, name), { force: true })
+
+      await remount()
+      const natState = await paneState()
+      const natMode = await attr(win, '[data-settings-wsl-mode]', 'data-settings-wsl-mode')
+
+      // The button offers the mode it is *not* on, so this click reaching the
+      // element is itself evidence the remount above happened: on a stale
+      // "mirrored" render there is no `mirrored` button to find, which is how
+      // the first run of this group failed - a write that never fired, whose
+      // notice was still the previous one's.
+      const rewriteClicked = await clickByData(win, 'settings-wsl-set', 'mirrored')
+      await pollJs(
+        win,
+        `document.querySelector('[data-settings-wsl-state]')?.dataset.settingsWslState === 'mirrored'`,
+        15_000
+      )
+      const rewritten = onDisk() ?? ''
+      const madeBackups = backups()
+      const backupText =
+        madeBackups.length === 1 ? readFileSync(join(profileDir, madeBackups[0] ?? ''), 'utf8') : ''
+      const rewrittenNotice = (await text(win, '[data-settings-wsl-notice]')).trim()
+
+      // Every line of the planted file except the one key, still present and
+      // unaltered - compared line by line rather than with a regex, because
+      // "nothing else changed" is a claim about all of them.
+      const keptLines = PLANTED.split('\r\n').filter(
+        (line) => line !== 'networkingMode=nat' && line !== ''
+      )
+      const rewrittenLines = rewritten.split(/\r?\n/)
+      const kept = keptLines.filter((line) => rewrittenLines.includes(line))
+      const mirroredOnce =
+        rewrittenLines.filter((line) => line.trim().toLowerCase().startsWith('networkingmode'))
+          .length === 1
+      const natGone = !rewritten.toLowerCase().includes('networkingmode=nat')
+      const insideSection =
+        rewrittenLines.findIndex((line) => line.trim() === '[wsl2]') <
+          rewrittenLines.findIndex((line) =>
+            line.trim().toLowerCase().startsWith('networkingmode')
+          ) &&
+        rewrittenLines.findIndex((line) =>
+          line.trim().toLowerCase().startsWith('networkingmode')
+        ) < rewrittenLines.findIndex((line) => line.trim() === '[experimental]')
+
+      /*
+       * Idempotence: the file already says this, so the write must report that
+       * and copy nothing.
+       *
+       * Hand-sent down the real channel rather than pressed, because the
+       * control is a **toggle** - now that the file reads mirrored the button
+       * offers `nat`, and there is no second press of "set mirrored" to make.
+       * That is the right shape for the pane and it leaves the unchanged reply
+       * with no button behind it, so the claim is made where it can be: the
+       * same handler the button calls, with the same argument. What the pane
+       * owes here instead is that the offer flipped, which is asserted beside
+       * it.
+       */
+      const offerAfterWrite = await attr(win, '[data-settings-wsl-set]', 'data-settings-wsl-set')
+      const again = await js<{ ok: boolean; unchanged: boolean; backupPath: string | null }>(
+        win,
+        `window.helm.invoke('wsl:setNetworking', { mode: 'mirrored' })
+           .then((r) => ({ ok: r.ok, unchanged: r.unchanged, backupPath: r.backupPath }))`
+      )
+      const afterAgain = onDisk() ?? ''
+      const backupsAfterAgain = backups()
+
+      const shot = await screenshot(win, shotDir, 'settings-9-wsl.png')
+
+      checks.push({
+        id: 'S-24',
+        criterion:
+          'The write sets one key, keeps everything else, and copies the file before touching it',
+        title:
+          'networkingMode is set inside [wsl2] with comments, sections and CRLF intact, over a timestamped backup',
+        ok:
+          createClicked &&
+          rewriteClicked &&
+          createdText !== null &&
+          createdText.includes('[wsl2]') &&
+          createdText.toLowerCase().includes('networkingmode=mirrored') &&
+          createdBackups.length === 0 &&
+          natState === 'not-mirrored' &&
+          natMode === 'nat' &&
+          kept.length === keptLines.length &&
+          mirroredOnce &&
+          natGone &&
+          insideSection &&
+          rewritten.includes('\r\n') &&
+          madeBackups.length === 1 &&
+          backupText === PLANTED &&
+          rewrittenNotice.includes(madeBackups[0] ?? 'no backup') &&
+          offerAfterWrite === 'nat' &&
+          again.ok &&
+          again.unchanged &&
+          again.backupPath === null &&
+          afterAgain === rewritten &&
+          backupsAfterAgain.length === 1,
+        detail: {
+          created: {
+            clickReached: createClicked,
+            text: createdText,
+            backups: createdBackups,
+            notice: createdNotice
+          },
+          plantedFileRead: { paneState: natState, paneMode: natMode },
+          rewrite: {
+            clickReached: rewriteClicked,
+            text: rewritten,
+            keptLinesExpected: keptLines,
+            keptLinesFound: kept,
+            exactlyOneModeLine: mirroredOnce,
+            oldValueGone: natGone,
+            insideTheWsl2Section: insideSection,
+            crlfPreserved: rewritten.includes('\r\n'),
+            notice: rewrittenNotice
+          },
+          backup: {
+            files: madeBackups,
+            bytesMatchTheFileAsFound: backupText === PLANTED,
+            plantedBytes: PLANTED
+          },
+          secondWrite: {
+            buttonNowOffers: offerAfterWrite,
+            reply: again,
+            fileUnchanged: afterAgain === rewritten,
+            backupsStillOne: backupsAfterAgain.length
+          },
+          screenshot: shot.file
+        },
+        notes: [
+          'The file is read off disk by this driver, not read back through the',
+          'channel that wrote it: a writer that reported success and wrote',
+          'nothing would agree with its own reply.',
+          'The backup is compared byte for byte against the bytes this driver',
+          'planted. A copy that exists is not the claim - a copy of *what was*',
+          'there is, and it is what makes the change reversible.',
+          'The created-from-nothing case must take no backup and say so: there',
+          'were no previous bytes, and the way back is deleting the file. A',
+          'timestamped copy of an empty file would be a way back to nothing.',
+          'The mode line is required to be inside [wsl2] and before the next',
+          'section header. An editor appending at EOF produces a file that',
+          'parses - the key would sit under [experimental] - and WSL would',
+          'ignore it, which is a change that reports success and does nothing.',
+          'The second write is the unchanged path: it must report that nothing',
+          'was written, leave the bytes alone, and *not* take a second copy,',
+          'because a copy per press would eventually bury the original. Sent',
+          'down the channel rather than pressed, because the control is a toggle',
+          'and after the write it offers `nat` - which is itself asserted, since',
+          'a toggle still offering the mode the file already has would be the',
+          'pane disagreeing with the file it had just written.'
+        ]
+      })
+
+      // ---------------------------------------------------------------------
+      // S-25: a file too odd to touch is refused, not rewritten
+      // ---------------------------------------------------------------------
+      //
+      // Two `networkingMode` keys under one `[wsl2]`. Which one a person meant
+      // is not Helm's to guess, and the failure this refuses to become is the
+      // one that matters: an editor that changed the first and left the second
+      // would leave the file saying something the user never wrote, having
+      // reported success.
+      const ODD = ['[wsl2]', 'networkingMode=mirrored', 'networkingMode=nat', ''].join('\n')
+      writeFileSync(configFile, ODD, 'utf8')
+      for (const name of backups()) rmSync(join(profileDir, name), { force: true })
+
+      await remount()
+      const refusedState = await paneState()
+      const refusalOnScreen = (await text(win, '[data-settings-wsl-state]')).trim()
+      const refusedButton = await disabled(win, '[data-settings-wsl-set]')
+      const clicked = await clickByData(win, 'settings-wsl-set', 'mirrored')
+      await sleep(900)
+      const oddAfter = onDisk() ?? ''
+      const oddBackups = backups()
+
+      checks.push({
+        id: 'S-25',
+        criterion: 'A file Helm cannot read with confidence is reported and left alone',
+        title: 'Two networkingMode keys: the pane prints the refusal, the button is dead, the bytes are untouched',
+        ok:
+          refusedState === 'refused' &&
+          refusalOnScreen.toLowerCase().includes('networkingmode') &&
+          refusedButton === true &&
+          oddAfter === ODD &&
+          oddBackups.length === 0,
+        detail: {
+          planted: ODD,
+          paneState: refusedState,
+          sentenceOnScreen: refusalOnScreen,
+          buttonDisabled: refusedButton,
+          clickReached: clicked,
+          fileAfter: oddAfter,
+          bytesUnchanged: oddAfter === ODD,
+          backupsTaken: oddBackups
+        },
+        notes: [
+          'The refusal is required to be *on screen* and to name the key. The',
+          'whole point of refusing is to tell the user what is in their file so',
+          'they can fix it in their own editor, and a disabled button with no',
+          'sentence beside it is a control that has simply stopped working.',
+          'The click is attempted anyway. A disabled attribute is the claim; the',
+          'file being byte-identical afterwards is the evidence, and only the',
+          'second one would survive the attribute being lost in a refactor.',
+          'No backup either: a refusal that copied the file first would leave',
+          'litter beside a file it then declined to change.'
+        ]
+      })
+
+      // ---------------------------------------------------------------------
+      // S-26: the two facts are never merged, and the restart is never a side effect
+      // ---------------------------------------------------------------------
+      //
+      // The state this exists for is the one every user of the control passes
+      // through: the file says `mirrored` and WSL has not restarted, so the
+      // file is right and the distro still cannot connect. Both are true and
+      // one verdict over the pair would hide it. So the pane must not paint a
+      // reachability verdict at all until somebody asks for one - asking boots
+      // a stopped distribution, which is why it is a button and not a mount.
+      writeFileSync(configFile, '[wsl2]\nnetworkingMode=mirrored\n', 'utf8')
+      for (const name of backups()) rmSync(join(profileDir, name), { force: true })
+      await remount()
+      const mirroredState = await paneState()
+      const verdictBeforeAsking = await exists(win, '[data-settings-wsl-reachable]')
+
+      const distrosOffered = await js<string[]>(
+        win,
+        `[...document.querySelectorAll('[data-settings-wsl-distro] option')]
+           .map((o) => o.value).filter((v) => v !== '')`
+      )
+      let probeAttribute: string | null = null
+      let driverSawReachable: boolean | null = null
+      const chosen = distrosOffered[0] ?? ''
+      // The port the running app is actually listening on, asked of the
+      // endpoint itself. Null where the tools are off, and then there is
+      // nothing for a distribution to reach and no second read to make.
+      const endpointPort = ctx.browserMcp?.address()?.port ?? null
+      if (chosen !== '') {
+        await click(win, '[data-settings-wsl-check]')
+        await pollJs(win, `document.querySelector('[data-settings-wsl-reachable]')`, 60_000)
+        probeAttribute = await attr(
+          win,
+          '[data-settings-wsl-reachable]',
+          'data-settings-wsl-reachable'
+        )
+        // The driver's own connect, from inside the distribution, with no part
+        // of Helm in it. `/dev/tcp` is a bash builtin, which is what the app's
+        // own probe uses and all a minimal distro is guaranteed to have.
+        try {
+          if (endpointPort === null) throw new Error('the tools are off; no endpoint to reach')
+          const answer = execFileSync(
+            'wsl.exe',
+            [
+              '-d',
+              chosen,
+              '--',
+              'bash',
+              '-lc',
+              `timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${String(endpointPort ?? 0)}' 2>/dev/null && echo yes || echo no`
+            ],
+            { encoding: 'utf8', timeout: 60_000, windowsHide: true }
+          )
+          driverSawReachable = answer.trim().endsWith('yes')
+        } catch {
+          driverSawReachable = null
+        }
+      }
+
+      // The restart, opened and cancelled. Its accepting half is deliberately
+      // not pressed - see the note.
+      const restartOffered = await exists(win, '[data-settings-wsl-restart]')
+      await click(win, '[data-settings-wsl-restart]')
+      const dialogUp = await pollJs(win, `document.querySelector('[data-wsl-shutdown-dialog]')`, 5000)
+      const dialogText = (await text(win, '[data-wsl-shutdown-dialog]')).toLowerCase()
+      const namesTheCost =
+        dialogText.includes('every') && (dialogText.includes('wsl') || dialogText.includes('distr'))
+      const namesClaude = dialogText.includes('claude')
+      await click(win, '[data-wsl-shutdown-cancel]')
+      const dialogGone = await pollJs(
+        win,
+        `document.querySelector('[data-wsl-shutdown-dialog]') === null`,
+        5000
+      )
+      const noticeAfterCancel = (await text(win, '[data-settings-wsl-notice]')).trim()
+
+      checks.push({
+        id: 'S-26',
+        criterion:
+          'What the file says and whether a distribution can reach Helm are two facts, never one',
+        title:
+          'A file reading mirrored paints no reachability verdict until Check is pressed, and Restart WSL only ever asks first',
+        ok:
+          mirroredState === 'mirrored' &&
+          !verdictBeforeAsking &&
+          restartOffered &&
+          dialogUp &&
+          namesTheCost &&
+          namesClaude &&
+          dialogGone &&
+          noticeAfterCancel === '' &&
+          (chosen === '' ||
+            (probeAttribute !== null &&
+              (driverSawReachable === null ||
+                probeAttribute === String(driverSawReachable)))),
+        detail: {
+          fileSays: onDisk(),
+          paneState: mirroredState,
+          reachabilityVerdictBeforeAsking: verdictBeforeAsking,
+          distrosOffered,
+          probe: {
+            distro: chosen,
+            paneAttribute: probeAttribute,
+            driversOwnConnect: driverSawReachable,
+            port: endpointPort
+          },
+          restart: {
+            offered: restartOffered,
+            dialogAppeared: dialogUp,
+            dialogText,
+            namesEveryWslProcess: namesTheCost,
+            namesClaudeSessions: namesClaude,
+            dismissedByCancel: dialogGone,
+            noticeAfterCancel
+          }
+        },
+        notes: [
+          'The divergence is the point. On this machine the fixture file now',
+          'reads mirrored while WSL has not restarted, so "the file is right"',
+          'and "the distro cannot connect" are both true at once - which is',
+          'exactly the state a single merged verdict would hide, and the reason',
+          'the pane has two rows instead of one.',
+          'No reachability verdict may be on screen before Check is pressed.',
+          'Painting one at mount would mean the pane had booted every',
+          'distribution on the machine to draw itself.',
+          'The probe answer is compared against a connect this driver makes',
+          'itself, through `wsl.exe`, to the port the running app is actually',
+          'listening on - not against what Helm says it found. A distro that',
+          'cannot be reached to ask records null rather than passing.',
+          'The dialog is required to name what it ends - every WSL process, and',
+          'Claude Code sessions running in one - because that is the cost the',
+          'user is being asked to accept and nothing in Helm can see its extent.',
+          'Its accepting half is NOT pressed, and this is the same standing',
+          'exception PKG-2 is: `wsl --shutdown` would end every WSL process on',
+          'this machine, including any Claude Code session in a distribution and',
+          'possibly the one reading this. Cancel is driven, the notice is',
+          'required to still be empty, and the confirmed path is unrun.'
+        ]
+      })
+    } finally {
+      // Back before anything else can ask for a home. A restore in `finally`
+      // rather than at the end of the block: a throw half way through would
+      // otherwise leave the rest of the process reading a fixture profile.
+      if (realProfile === undefined) delete process.env['USERPROFILE']
+      else process.env['USERPROFILE'] = realProfile
+    }
   }
 
   // -------------------------------------------------------------------------

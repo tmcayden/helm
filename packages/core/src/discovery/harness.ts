@@ -85,6 +85,23 @@ export interface CreateHarnessResult {
    * happened - see `applyTemplate`.
    */
   problems: string[]
+  /**
+   * The harness that was already there, when that is why nothing was written.
+   *
+   * Set only by `convert` meeting a directory that already has a manifest, and
+   * it exists so the caller can tell that case apart from every other refusal
+   * **without matching on the sentence in `problems`**.
+   *
+   * The distinction matters because the two need opposite handling. "This is
+   * not a folder" is a mistake to report. "This is already a harness" is not a
+   * failure at all - the thing the user asked for exists - and the useful
+   * response is to make sure Helm can *see* it. That is a real gap on a machine
+   * with WSL: a harness inside a distribution is never covered by a scan root,
+   * because the roots are Windows paths and nothing adds a `\\wsl$\` one. So
+   * the user is told their folder is already a harness while the launcher shows
+   * no such harness anywhere, which reads as Helm contradicting itself.
+   */
+  existing: string | null
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -187,7 +204,7 @@ export async function createHarness(
     }
     // Every refusal above is about the request, so none of them has written
     // anything: this is the last point at which "nothing happened" is true.
-    if (problems.length > 0) return { path: null, created: [], problems }
+    if (problems.length > 0) return { path: null, created: [], problems, existing: null }
 
     const target = join(dir, name)
     if (await exists(target)) {
@@ -201,7 +218,15 @@ export async function createHarness(
           (await exists(join(target, HARNESS_MANIFEST)))
             ? `${target} is already a harness.`
             : `${target} already exists.`
-        ]
+        ],
+        // Null even when the target *is* a harness, which is the one place this
+        // field is deliberately not set. `existing` tells the caller "what you
+        // asked for is already there, adopt it"; here the user asked to create a
+        // **new** folder of a given name, and a directory of that name existing
+        // is a collision rather than the thing they meant. The comment above is
+        // the argument, and it did not stop being true when `convert` gained a
+        // way to say the opposite.
+        existing: null
       }
     }
 
@@ -247,15 +272,20 @@ export async function createHarness(
       'utf8'
     )
     created.push(HARNESS_MANIFEST)
-    return { path: target, created, problems }
+    return { path: target, created, problems, existing: null }
   }
 
   // convert
   if (!(await isDirectory(dir))) {
-    return { path: null, created: [], problems: [`${dir} is not a folder.`] }
+    return { path: null, created: [], problems: [`${dir} is not a folder.`], existing: null }
   }
   if (await exists(join(dir, HARNESS_MANIFEST))) {
-    return { path: null, created: [], problems: [`${dir} is already a harness.`] }
+    return {
+      path: null,
+      created: [],
+      problems: [`${dir} is already a harness.`],
+      existing: dir
+    }
   }
 
   const created: string[] = []
@@ -281,7 +311,7 @@ export async function createHarness(
     await mkdir(join(dir, '.claude'), { recursive: true })
     created.push('.claude')
   }
-  return { path: dir, created, problems: [] }
+  return { path: dir, created, problems: [], existing: null }
 }
 
 /**

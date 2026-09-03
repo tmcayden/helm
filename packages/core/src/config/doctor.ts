@@ -44,7 +44,13 @@ export async function runDoctor(command: ClaudeCommand): Promise<DoctorReport> {
     const result = await run(command.file, [...(command.prefixArgs ?? []), 'doctor'], {
       timeout: TIMEOUT_MS,
       windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024
+      maxBuffer: 8 * 1024 * 1024,
+      // Where *this* process may start the program, which for a WSL command is
+      // not the directory the CLI works in: that one is a `\\wsl$\` path and
+      // rides on `--cd` in `prefixArgs`. `execFile` given a UNC cwd does not
+      // fail - it silently falls back to `C:\Windows` - so the honest thing is
+      // to say where to start rather than to let it choose.
+      ...(command.hostCwd !== undefined ? { cwd: command.hostCwd } : {})
     })
     const output = `${result.stdout}${result.stderr}`.trim()
     return {

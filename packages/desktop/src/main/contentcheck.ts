@@ -746,7 +746,8 @@ export async function runContentChecks(
       agent: null,
       mcp: [],
       openingPrompt: null,
-      pinnedOrder: null
+      pinnedOrder: null,
+      target: null
     })
   }
   const profile = asProfile(PROFILE_NAME, fixtures.root)

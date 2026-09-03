@@ -6,12 +6,14 @@ import {
   claudeHome,
   countUsageMessages,
   projectsDirIn,
-  readSettings
+  readSettings,
+  type WslHome
 } from '@helm/core'
 import { screenshot, sleep, stripAnsi, waitFor } from './bridge'
 import type { Check } from './fidelity'
 import { atPrompt, type Collector, type CheckContext } from './sessionscheck'
 import { answerConsent } from './profilescheck'
+import { wslHomes } from './wsl'
 
 /**
  * The status bar's usage figures, driven through the app the way a user sees
@@ -56,7 +58,11 @@ const GROUPS = [
   'width',
   'cost',
   'dollars',
-  'live'
+  'live',
+  // Last on purpose, and the ordering is load-bearing rather than cosmetic -
+  // see the comment on the group itself. `useHomes` appends and nothing
+  // removes.
+  'homes'
 ] as const
 type Group = (typeof GROUPS)[number]
 
@@ -314,8 +320,20 @@ const emptyWindow = (): OwnWindow => ({
  * index, and being slow is what makes it a second opinion rather than the same
  * opinion twice.
  */
+/**
+ * Every transcript under **every** home, parsed the naive way.
+ *
+ * Takes a list rather than one directory because the index it is checked
+ * against reads one: a machine with WSL keeps a `projects/` per distribution,
+ * and on this one they are 23 transcripts here against 1,066 in Ubuntu. A
+ * single-directory oracle compared 1,022 session messages against an app
+ * counting 135,850 and called the app wrong.
+ *
+ * Deduplication by `uuid` was already here for forks, and it is what makes
+ * merging homes safe with nothing else to reconcile.
+ */
 function ownSpend(
-  projectsDir: string,
+  projectsDirs: readonly string[],
   nowMs: number,
   sessionStartMs: number,
   todayStartMs: number
@@ -341,7 +359,7 @@ function ownSpend(
       else if (entry.name.endsWith('.jsonl')) files.push(path)
     }
   }
-  walk(projectsDir)
+  for (const dir of projectsDirs) walk(dir)
 
   for (const file of files) {
     let text: string
@@ -632,6 +650,37 @@ export async function runUsageChecks(
 
   const realFile = claudeConfigFileIn()
 
+  /**
+   * Every `.claude.json` this account has on this machine, and which of them
+   * actually holds the reading the bar is painting.
+   *
+   * `claudeConfigFileIn()` alone is **this machine's**, and on a machine with
+   * WSL that is not where the reading necessarily lives: each distribution
+   * keeps its own, the freshest wins, and here the Windows one carries no
+   * `cachedUsageUtilization` at all while Ubuntu's has a live reading. So a
+   * probe reading one file compared "nothing to show" against a bar correctly
+   * painting Ubuntu's figure, and called the app wrong.
+   *
+   * The ranking is re-implemented rather than imported, which is the whole
+   * point of a second opinion: `freshestUsage` deciding it agrees with itself
+   * proves nothing. Newest `fetchedAtMs` wins; a file with no reading is not a
+   * candidate at all, which is the rule that keeps this machine's empty file
+   * from beating a distribution's real one.
+   */
+  const realCandidates = [realFile, ...(await wslHomes()).map((home) => claudeConfigFileIn(home.claudeHome))]
+  const freshestRealFile = (): string => {
+    let best = realFile
+    let bestAt = -1
+    for (const candidate of realCandidates) {
+      const at = ownRead(candidate).fetchedAtMs
+      if (at !== null && at > bestAt) {
+        bestAt = at
+        best = candidate
+      }
+    }
+    return best
+  }
+
   // The first reading is taken after the renderer reports ready, so the segment
   // may not have been handed one yet when this driver starts in the same turn.
   await waitFor(() => usage.snapshot().file !== '', 15_000)
@@ -646,7 +695,8 @@ export async function runUsageChecks(
     await sleep(500)
 
     const at = Date.now()
-    const mine = ownRead(realFile)
+    const winner = freshestRealFile()
+    const mine = ownRead(winner)
     const expected = ownExpectation(mine, at)
     const text = await segmentText(win)
     const painted = paintedPercents(text)
@@ -1326,7 +1376,10 @@ export async function runUsageChecks(
     // anchored on the plan's own reset time, so the driver has to read that
     // from the file rather than assume "the last five hours".
     const now = Date.now()
-    const mine = ownRead(realFile)
+    // The file the bar is actually reading, which on a machine with WSL is not
+    // necessarily this one's - the session window is anchored on that file's own
+    // reset time, so reading the wrong one moves the window.
+    const mine = ownRead(freshestRealFile())
     const sessionLimit = mine.limits.find((l) => l.group === 'session')
     const sessionStart =
       sessionLimit?.resetsAtMs == null
@@ -1336,7 +1389,7 @@ export async function runUsageChecks(
     midnight.setHours(0, 0, 0, 0)
 
     const independent = ownSpend(
-      projectsDirIn(claudeHome()),
+      [claudeHome(), ...(await wslHomes()).map((home) => home.claudeHome)].map(projectsDirIn),
       now,
       sessionStart,
       midnight.getTime()
@@ -1389,6 +1442,12 @@ export async function runUsageChecks(
         todayFrom: midnight.toISOString(),
         indexCatchUpMs: catchUpMs,
         indexPasses: passes,
+        // Whether the loop above actually reached a level index or simply ran
+        // out of passes. Without this, "the app disagrees with a full parse"
+        // and "the app had not finished reading yet" are one red line, and the
+        // second is not a defect in the figures at all.
+        indexCaughtUp: indexed.caughtUp,
+        indexedMessages: countUsageMessages(services.store),
         labelledAsEstimate: labelled,
         priceDateShown: dated,
         text: costText,
@@ -1529,6 +1588,418 @@ export async function runUsageChecks(
         'longer tells anyone to start a session.'
       ]
     })
+  }
+
+  // -------------------------------------------------------------------------
+  // U-12, U-13: more than one install, and the freshest reading wins
+  // -------------------------------------------------------------------------
+  //
+  // Ordered LAST, deliberately, and this is the one group whose position is an
+  // assertion about the rest of the file. `useHomes` *appends* to the candidate
+  // list and the service has no removal, so a home added here is a candidate
+  // for the remaining life of the process - and every group that reads the real
+  // configuration does so through `pointAt(null)`, which restores *all* the
+  // homes rather than only this machine's. Running earlier would therefore hand
+  // `read`, `cost`, `dollars` and `live` a fixture beside `~/.claude.json`, and
+  // a fresher fixture would win: the "check that passes because it silently
+  // measured something else" failure, arriving through a feature instead of a
+  // bug. What *can* be restored is restored anyway rather than trusted to the
+  // ordering - the fixture files are deleted at the end, so the appended homes
+  // resolve to files that are not there and can never win a ranking again, and
+  // the last assertion in the group is that no fixture of this group's is
+  // being read any more. Both, because the ordering is a fact about this file
+  // that the next person to add a group can undo without noticing.
+  //
+  // `pointAt` is not the tool here and could not be: it isolates the reader to
+  // exactly one candidate, which is the whole of its purpose. A rule about
+  // ranking several candidates cannot be probed through a hook that guarantees
+  // there is one, which is why this rule had no coverage at all.
+  if (run('homes')) {
+    await ensurePercentMode(win)
+
+    /**
+     * What the reader was doing before this group touched anything.
+     *
+     * Taken as a reading rather than assumed to be `~/.claude.json`, because on
+     * a machine with WSL it legitimately is not: the app announces the real
+     * distributions' homes at startup, and one of *those* may already hold the
+     * freshest reading. Reported rather than asserted against: that probe is
+     * async and may land while this group runs, so the baseline is not a
+     * restoration target - see the cleanup at the end of the group.
+     */
+    const baseline = usage.refresh()
+
+    /**
+     * Two fixture homes, and the one thing this group cannot reach.
+     *
+     * The rule is about this machine's `~/.claude.json` against a distro's, and
+     * only one half of that pair is reachable from a check. The machine's own
+     * candidate is `claudeConfigFileIn(claudeHome())`, captured by the service
+     * at construction; giving *it* a reading would mean writing into the user's
+     * real `~/.claude.json`, which is Claude Code's file and which nothing here
+     * may touch. On the machine this was written on it carries no
+     * `cachedUsageUtilization` at all - measured below rather than assumed - so
+     * it cannot win a ranking, and `origin: null`, which is the field's value
+     * exactly when the winner *is* this machine's file, is therefore not
+     * produced by this group. Recorded in the detail as `notCovered` rather
+     * than quietly skipped.
+     *
+     * What is produced is the half the rule is actually made of: two real
+     * candidates, both carrying readings, ranked by `fetchedAtMs` and by
+     * nothing else. Named after distributions because `origin` is a
+     * distribution's name; the directories are `alpha` and `beta` so that the
+     * file path in the tooltip cannot accidentally satisfy an assertion about
+     * the *origin sentence* naming one.
+     */
+    const ALPHA = 'Ubuntu-24.04'
+    const BETA = 'Debian-Sid'
+    const NOREADING = 'Fedora-Remix'
+    const alphaHome = join(fixtureDir, 'homes', 'alpha', '.claude')
+    const betaHome = join(fixtureDir, 'homes', 'beta', '.claude')
+    const noReadingHome = join(fixtureDir, 'homes', 'nothing', '.claude')
+
+    /** `<home>/.claude.json`, which is the layout `claudeConfigFileIn` prefers. */
+    const homeFixture = (dir: string, fetchedAtMs: number, session: number, weekly: number): string =>
+      fixture(dir, '.claude', {
+        fetchedAtMs,
+        limits: [
+          { kind: 'session', group: 'session', percent: session, resetsAtMs: fetchedAtMs + 3 * 3_600_000 },
+          {
+            kind: 'weekly_all',
+            group: 'weekly',
+            percent: weekly,
+            resetsAtMs: fetchedAtMs + 40 * 3_600_000
+          }
+        ]
+      })
+
+    const mtimeOf = (file: string): number | null => {
+      try {
+        return statSync(file).mtimeMs
+      } catch {
+        return null
+      }
+    }
+
+    interface Ranked {
+      fresherIs: 'alpha' | 'beta'
+      expectedOrigin: string
+      losingOrigin: string
+      files: Record<string, string>
+      independent: Record<string, unknown>
+      fromTheFresherFile: OwnExpectation
+      fromTheOlderFile: OwnExpectation
+      painted: ReturnType<typeof paintedPercents>
+      snapshot: { file: string; origin: string | null; fetchedAtMs: number | null }
+      /** What a reader that merged instead of ranking would have painted. */
+      merges: Record<string, number>
+      tooltipNamesWinner: boolean
+      tooltipNamesLoser: boolean
+      originSentences: number
+      text: string
+      tooltip: string
+      ok: boolean
+      failed: string[]
+    }
+
+    /**
+     * One ranking, driven end to end through the window.
+     *
+     * Called twice with the two stamps swapped and *nothing else changed*. That
+     * is what makes `fetchedAtMs` the variable under test: the same two files,
+     * the same two pairs of figures, the same order in the candidate list, and
+     * the winner moves. One direction alone proves far less than it looks -
+     * a reader that always took the last candidate, or the highest figure,
+     * would pass whichever direction happened to agree with it.
+     */
+    const rank = async (fresherIs: 'alpha' | 'beta'): Promise<Ranked> => {
+      const at = Date.now()
+      const older = at - 10 * 60_000
+      const alphaFile = homeFixture(alphaHome, fresherIs === 'alpha' ? at : older, 12, 34)
+      const betaFile = homeFixture(betaHome, fresherIs === 'beta' ? at : older, 71, 88)
+      // Written third, so it holds the newest mtime of the three. A candidate
+      // with no reading in it is not a vote, and mtime is the tempting wrong
+      // ranking: it is what the stat poll notices a *change* with, and a reader
+      // that ranked by "most recently touched file" rather than by the stamp
+      // inside it would pick this one and blank the bar. This is also the real
+      // state of the machine this was written on - `~/.claude.json` here has no
+      // `cachedUsageUtilization` key at all - so it is the case in the group
+      // most likely to be the one that matters in practice.
+      const noReadingFile = fixture(noReadingHome, '.claude', { cached: undefined })
+
+      const ownAlpha = ownRead(alphaFile)
+      const ownBeta = ownRead(betaFile)
+      const ownNothing = ownRead(noReadingFile)
+      const ownPrimary = ownRead(realFile)
+
+      const fresher = fresherIs === 'alpha' ? ownAlpha : ownBeta
+      const stale = fresherIs === 'alpha' ? ownBeta : ownAlpha
+      const fromTheFresherFile = ownExpectation(fresher, Date.now())
+      const fromTheOlderFile = ownExpectation(stale, Date.now())
+
+      const text = await waitForText(
+        win,
+        (t) => paintedPercents(t).session === fromTheFresherFile.session,
+        15_000
+      )
+      const painted = paintedPercents(text)
+      const tooltip = await segmentTitle(win)
+      const snapshot = usage.snapshot()
+      const expectedOrigin = fresherIs === 'alpha' ? ALPHA : BETA
+      const losingOrigin = fresherIs === 'alpha' ? BETA : ALPHA
+
+      const a = fromTheFresherFile.session ?? -1
+      const b = fromTheOlderFile.session ?? -1
+      const merges = {
+        average: Math.round((a + b) / 2),
+        sum: a + b,
+        higher: Math.max(a, b),
+        lower: Math.min(a, b)
+      }
+
+      const winnerFile = fresherIs === 'alpha' ? alphaFile : betaFile
+      const originSentences = tooltip.split('Read from the Claude Code in').length - 1
+
+      // Every clause named, so a failure says which one rather than "false".
+      const failed: string[] = []
+      const need = (why: string, held: boolean): void => {
+        if (!held) failed.push(why)
+      }
+      // The fixture has to be discriminating before anything read off the
+      // screen means anything (CLAUDE.md, the PROF-4 rule).
+      need(
+        'the two fixture files carry readings at different fetchedAtMs',
+        fresher.fetchedAtMs !== null &&
+          stale.fetchedAtMs !== null &&
+          fresher.fetchedAtMs > stale.fetchedAtMs
+      )
+      need(
+        'the two readings could not both be true',
+        fromTheFresherFile.session !== fromTheOlderFile.session &&
+          fromTheFresherFile.weekly !== fromTheOlderFile.weekly
+      )
+      need('the third candidate carries no reading at all', ownNothing.broken !== null)
+      need(
+        'the reading-free candidate was the most recently written file',
+        (mtimeOf(noReadingFile) ?? 0) >= Math.max(mtimeOf(alphaFile) ?? 0, mtimeOf(betaFile) ?? 0)
+      )
+      // The figures on the bar are the fresher file's, read out of that file by
+      // this driver rather than out of anything Helm said about it.
+      need('the bar painted the fresher file’s session figure', painted.session === fromTheFresherFile.session)
+      need(
+        'the bar painted the fresher file’s weekly figure',
+        painted.weekly === fromTheFresherFile.weekly
+      )
+      need('neither figure was bounded, both readings being fresh', painted.atLeast === fromTheFresherFile.atLeast)
+      need('nothing was blanked by the candidate that had no reading', painted.session !== null)
+      // Nothing merged: not the average, not the sum. "Not the higher" and
+      // "not the lower" cannot be asserted within one direction - the winner is
+      // one of them - and are settled by the two directions disagreeing.
+      need('the painted figure is not the average of the two', painted.session !== merges.average)
+      need('the painted figure is not their sum', painted.session !== merges.sum)
+      need('the winner names its own file', snapshot.file === winnerFile)
+      need('the snapshot’s origin is the winning install', snapshot.origin === expectedOrigin)
+      need('the tooltip names the winning install', tooltip.includes(expectedOrigin))
+      need('the tooltip does not name the losing install', !tooltip.includes(losingOrigin))
+      need('the tooltip says where the reading came from exactly once', originSentences === 1)
+
+      return {
+        fresherIs,
+        expectedOrigin,
+        losingOrigin,
+        files: { alpha: alphaFile, beta: betaFile, noReading: noReadingFile, primary: realFile },
+        independent: {
+          alpha: { fetchedAtMs: ownAlpha.fetchedAtMs, limits: ownAlpha.limits },
+          beta: { fetchedAtMs: ownBeta.fetchedAtMs, limits: ownBeta.limits },
+          noReading: { broken: ownNothing.broken, mtimeMs: mtimeOf(noReadingFile) },
+          thisMachine: { file: realFile, broken: ownPrimary.broken, fetchedAtMs: ownPrimary.fetchedAtMs },
+          mtimeMs: {
+            alpha: mtimeOf(alphaFile),
+            beta: mtimeOf(betaFile),
+            noReading: mtimeOf(noReadingFile)
+          }
+        },
+        fromTheFresherFile,
+        fromTheOlderFile,
+        painted,
+        snapshot: {
+          file: snapshot.file,
+          origin: snapshot.origin,
+          fetchedAtMs: snapshot.fetchedAtMs
+        },
+        merges,
+        tooltipNamesWinner: tooltip.includes(expectedOrigin),
+        tooltipNamesLoser: tooltip.includes(losingOrigin),
+        originSentences,
+        text,
+        tooltip: tooltip.split('\n').slice(-3).join(' | '),
+        ok: failed.length === 0,
+        failed
+      }
+    }
+
+    // Both files written before the homes are announced, so the service reads
+    // three candidates in one pass rather than ranking against a file that has
+    // not appeared yet.
+    homeFixture(alphaHome, Date.now() - 10 * 60_000, 12, 34)
+    homeFixture(betaHome, Date.now(), 71, 88)
+    fixture(noReadingHome, '.claude', { cached: undefined })
+    const announced: WslHome[] = [
+      { distro: ALPHA, home: '/home/checker/alpha', claudeHome: alphaHome },
+      { distro: BETA, home: '/home/checker/beta', claudeHome: betaHome },
+      { distro: NOREADING, home: '/home/checker/nothing', claudeHome: noReadingHome }
+    ]
+    usage.useHomes(announced)
+    await sleep(600)
+
+    const distroFresher = await rank('beta')
+    await screenshot(win, shotDir, 'usage-12-distro-fresher.png')
+    const otherFresher = await rank('alpha')
+    await screenshot(win, shotDir, 'usage-12-other-fresher.png')
+
+    // The clause neither direction can carry on its own: the painted figure
+    // moved when only the stamps moved. This is what rules out every fixed
+    // reduction - highest, lowest, first candidate, last candidate - and it is
+    // an assertion about the pair rather than about either half.
+    const followedTheStamp =
+      distroFresher.painted.session !== otherFresher.painted.session &&
+      distroFresher.snapshot.origin !== otherFresher.snapshot.origin
+
+    checks.push({
+      id: 'U-12',
+      criterion: 'With more than one install, the freshest reading wins and nothing is merged',
+      title: 'Two homes carrying readings are ranked by fetchedAtMs, in both directions',
+      ok: distroFresher.ok && otherFresher.ok && followedTheStamp,
+      detail: {
+        distroFresher,
+        otherFresher,
+        followedTheStamp,
+        // What the reader was on before the fixtures were announced, which on a
+        // machine with WSL may itself be a distribution's file. Recorded
+        // because it says what *real* candidates the fixtures were ranked
+        // against - and it is not the restoration target, for the reason
+        // written at the cleanup below.
+        baseline: {
+          file: baseline.file,
+          origin: baseline.origin,
+          fetchedAtMs: baseline.fetchedAtMs,
+          problem: baseline.problem?.kind ?? null
+        },
+        notCovered:
+          'origin === null, which is the value when this machine’s own file wins. That needs a ' +
+          'reading in the real ~/.claude.json, which no check may write, and the one on this ' +
+          'machine carries no cachedUsageUtilization at all (see independent.thisMachine).'
+      },
+      notes: [
+        'Two candidates, both real files with real readings, and the two figures',
+        'chosen so they could not both be true: 12% and 71%. An average would',
+        'paint 42, a sum 83, and both are asserted against directly.',
+        'Run twice with the stamps swapped and nothing else changed. That pair is',
+        'the check: one direction alone is passed by a reader that always takes',
+        'the last candidate, or the highest number, and the figure moving when',
+        'only `fetchedAtMs` moved is what leaves ranking as the only explanation.',
+        'A third candidate carries no reading at all and is written last, so it',
+        'also holds the newest mtime - the ranking a reader would fall into if it',
+        'used the same signal the stat poll uses to notice a change. It must lose',
+        'to both and must not blank the bar. That is not a hypothetical: this',
+        'machine’s own ~/.claude.json is exactly that file.',
+        'Every figure is compared against this driver’s own JSON.parse of the two',
+        'fixtures, never against what Helm said about them.',
+        'What this group cannot produce is `origin === null`, and it says so in',
+        'the detail rather than leaving the gap unmarked.'
+      ]
+    })
+
+    checks.push({
+      id: 'U-13',
+      criterion: 'A reading taken from another install says so',
+      title: 'The origin sentence is in the segment’s tooltip in the DOM, naming the install that won',
+      ok:
+        distroFresher.tooltipNamesWinner &&
+        !distroFresher.tooltipNamesLoser &&
+        distroFresher.originSentences === 1 &&
+        otherFresher.tooltipNamesWinner &&
+        !otherFresher.tooltipNamesLoser &&
+        otherFresher.originSentences === 1,
+      detail: {
+        distroFresher: {
+          expected: distroFresher.expectedOrigin,
+          namesWinner: distroFresher.tooltipNamesWinner,
+          namesLoser: distroFresher.tooltipNamesLoser,
+          sentences: distroFresher.originSentences,
+          tooltipTail: distroFresher.tooltip
+        },
+        otherFresher: {
+          expected: otherFresher.expectedOrigin,
+          namesWinner: otherFresher.tooltipNamesWinner,
+          namesLoser: otherFresher.tooltipNamesLoser,
+          sentences: otherFresher.originSentences,
+          tooltipTail: otherFresher.tooltip
+        }
+      },
+      notes: [
+        'Read off the real element’s `title` attribute, not off the snapshot: the',
+        'origin is only worth carrying if it reaches the person looking at the',
+        'bar, and a field nobody renders is a field nobody reads.',
+        'The losing install’s name must be absent, which is why the fixture',
+        'directories are `alpha` and `beta` and the installs are named after',
+        'distributions - the file path is in the same tooltip, so a directory',
+        'called `Ubuntu-24.04` would satisfy the assertion without the sentence',
+        'existing at all.'
+      ]
+    })
+
+    // Put back what can be put back. The homes stay on the service - there is
+    // no removal - but with their files gone every one of them resolves to a
+    // path that is not there, which is a `no-file` problem and can never win a
+    // ranking again. The assertion is the point of doing it: the reader has to
+    // be back on the reading it started this group with.
+    //
+    // The files rather than the directories, and that is not tidiness: those
+    // directories are the ones `watchFiles` is watching, and on Windows a
+    // directory with a live `fs.watch` on it refuses to be removed - measured
+    // here as `ENOTEMPTY`, which threw out of the group and cost the whole run
+    // its report. Nothing removes a watch except `stop()`, so the fixture
+    // *files* are what goes.
+    const cleanupFailed: string[] = []
+    for (const dir of [alphaHome, betaHome, noReadingHome]) {
+      try {
+        rmSync(join(dir, '.claude.json'), { force: true })
+      } catch (err) {
+        cleanupFailed.push(`${dir}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    const restored = usage.refresh()
+    /*
+     * "No longer reading a fixture", not "reading exactly what it read before".
+     *
+     * Equality against the baseline was the first version of this and it was
+     * the probe being wrong rather than the app: the real distributions are
+     * announced by an async `wsl.exe` probe that may not have finished when
+     * this group starts, so the baseline can be this machine's own file while
+     * the correct answer a few seconds later is a distro's - measured exactly
+     * that way, `C:\Users\...\.claude.json` before and `\\wsl$\Ubuntu\...`
+     * after, with the app right both times. What the group is actually
+     * responsible for is that none of *its* files is being read any more, and
+     * that is a claim with no race in it.
+     */
+    const stillOnAFixture = restored.file.toLowerCase().startsWith(fixtureDir.toLowerCase())
+    const affected = checks.find((check) => check.id === 'U-12')
+    if (affected) {
+      // Recorded whether or not it held: what the reader is left on is the
+      // thing the next group inherits, so it belongs in the report either way.
+      affected.detail = {
+        ...affected.detail,
+        stillOnAFixture,
+        restoredTo: {
+          file: restored.file,
+          origin: restored.origin,
+          problem: restored.problem?.kind ?? null
+        },
+        cleanupFailed
+      }
+      if (stillOnAFixture || cleanupFailed.length > 0) affected.ok = false
+    }
   }
 
   usage.pointAt(null)

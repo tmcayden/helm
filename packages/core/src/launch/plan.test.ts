@@ -404,3 +404,106 @@ describe('the ephemeral MCP config sweep', () => {
     }).not.toThrow()
   })
 })
+
+describe('a WSL target', () => {
+  /**
+   * The translation is asserted on the **argv**, never on the plan's `cwd`.
+   *
+   * `wsl.exe --cd` takes a Windows path and translates it itself (measured
+   * 2026-09-02), and the pty is opened with that path - so a plan whose `cwd`
+   * had been translated would be a pty opened on a directory this process
+   * cannot see. The argv is the half the CLI inside the distro reads.
+   */
+  it('translates every path on the argv and leaves the cwd alone', () => {
+    const project = makeProject('acme', '# Acme\n')
+    const plan = prepareLaunch({
+      root,
+      name: 'wsl session',
+      overlays: [project],
+      access: [project],
+      shimRoot,
+      target: { kind: 'wsl', distro: 'Ubuntu' }
+    })
+
+    expect(plan.target).toEqual({ kind: 'wsl', distro: 'Ubuntu' })
+    // The pty's cwd stays in this process's own spelling.
+    expect(plan.cwd).toBe(resolve(root))
+    // ... and so do the files this process wrote.
+    expect(plan.memoryFile).not.toBeNull()
+    expect(existsSync(plan.memoryFile as string)).toBe(true)
+
+    // Nothing the distro will open may still be Windows-spelled.
+    for (const flag of ['--add-dir', '--plugin-dir', '--append-system-prompt-file']) {
+      const at = plan.argv.indexOf(flag)
+      expect(at, `${flag} is on the argv`).toBeGreaterThanOrEqual(0)
+      const value = plan.argv[at + 1] ?? ''
+      expect(value.startsWith('/'), `${flag} value ${value} is a distro path`).toBe(true)
+      expect(value).not.toMatch(/^[A-Za-z]:/)
+    }
+  })
+
+  it('is the identity for a Windows target', () => {
+    const project = makeProject('acme', '# Acme\n')
+    const plan = prepareLaunch({
+      root,
+      name: 'windows session',
+      overlays: [project],
+      access: [project],
+      shimRoot,
+      target: { kind: 'windows' }
+    })
+    expect(plan.argv).toContain(resolve(project))
+    expect(plan.target).toEqual({ kind: 'windows' })
+  })
+
+  it('defaults to Windows when no target is given', () => {
+    // Every caller that existed before targets did takes this branch.
+    const plan = prepareLaunch({ root, name: 'untargeted', shimRoot })
+    expect(plan.target).toEqual({ kind: 'windows' })
+  })
+
+  it('warns about a path with no spelling inside the distro rather than passing it through', () => {
+    // A UNC path into a *different* distro: `/home/me` in Debian is not
+    // `/home/me` in Ubuntu, so passing it through would grant the wrong tree.
+    const plan = prepareLaunch({
+      root,
+      name: 'mismatched',
+      access: ['\\\\wsl$\\Debian\\home\\me'],
+      shimRoot,
+      target: { kind: 'wsl', distro: 'Ubuntu' }
+    })
+    expect(plan.argv).not.toContain('--add-dir')
+    // Dropped silently would be a session quietly granted nothing.
+    expect(plan.warnings.join(' ')).toMatch(/Debian/)
+  })
+})
+
+describe('a project that lives inside a distro', () => {
+  /**
+   * The inference is a correctness requirement, not a convenience: a Windows
+   * process cannot be spawned with a UNC working directory at all - measured
+   * 2026-09-02, `CreateProcess` answers ENOENT - so this profile on the
+   * Windows target is a session that never starts.
+   */
+  it('runs in that distro even though the profile says Windows', () => {
+    const plan = prepareLaunch({
+      root: '\\\\wsl$\\Ubuntu\\home\\me\\harness',
+      name: 'resident',
+      shimRoot,
+      target: { kind: 'windows' }
+    })
+    expect(plan.target).toEqual({ kind: 'wsl', distro: 'Ubuntu' })
+  })
+
+  it('says so when the profile named a different distro', () => {
+    // A real contradiction rather than an unset field, so it earns a sentence.
+    const plan = prepareLaunch({
+      root: '\\\\wsl$\\Ubuntu\\home\\me\\harness',
+      name: 'mismatched',
+      shimRoot,
+      target: { kind: 'wsl', distro: 'Debian' }
+    })
+    expect(plan.target).toEqual({ kind: 'wsl', distro: 'Ubuntu' })
+    expect(plan.warnings.join(' ')).toMatch(/Debian/)
+  })
+})

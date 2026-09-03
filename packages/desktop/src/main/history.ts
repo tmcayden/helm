@@ -8,10 +8,12 @@ import {
   indexHistory,
   projectsDirIn,
   readHistoryTail,
+  resolveRecordedPath,
   scanTranscripts,
   type HistorySummary,
   type Store,
-  type TranscriptFile
+  type TranscriptFile,
+  type WslHome
 } from '@helm/core'
 
 /**
@@ -60,8 +62,20 @@ export interface HistoryService {
   /** Begins watching. Safe to call twice. */
   start: () => void
   stop: () => void
-  /** The file being indexed; the resume path and the UI both name it. */
+  /** The primary file being indexed; the resume path and the UI both name it. */
   file: string
+  /**
+   * Adds the WSL distributions' history files to the index.
+   *
+   * Separate from construction because finding them is a `wsl.exe` per
+   * distribution and the window must not wait on it: the index starts on this
+   * machine's history, which is what it has always done, and the distros join
+   * when the probe lands. Idempotent, and safe after `start` - it re-watches.
+   *
+   * Passing a list that is already indexed does nothing, so the startup call
+   * and a later refresh after somebody installs a distro are the same call.
+   */
+  useHomes: (homes: readonly WslHome[]) => void
 }
 
 export interface HistoryServiceDeps {
@@ -89,7 +103,39 @@ export function createHistoryService({
   home = claudeHome()
 }: HistoryServiceDeps): HistoryService {
   const file = historyFileIn(home)
-  const projectsDir = projectsDirIn(home)
+
+  /**
+   * Every `~/.claude` being indexed, this machine's first.
+   *
+   * The head never changes; the tail is the distros, added by `useHomes` when
+   * the probe that finds them lands. Order matters only for the summary, whose
+   * `historyFile` is the one the UI names when it has room for one.
+   */
+  let homes: readonly string[] = [home]
+  const filesOf = (): string[] => homes.map(historyFileIn)
+
+  /**
+   * The distros, for translating the project paths their sessions recorded.
+   *
+   * A session in a distro writes `/home/me/harness` into its `history.jsonl`,
+   * because that is the directory its CLI was in. `statSync` on Windows
+   * resolves a leading `/` against the current drive root, so every one of
+   * those reads as absent - and `projectExists` is what decides whether a
+   * conversation can be offered for resume at all. Measured before this: 214
+   * distro conversations with a surviving transcript, 0 of them resumable.
+   */
+  let distros: readonly WslHome[] = []
+
+  /**
+   * Whether a recorded working directory is still there, in either spelling.
+   *
+   * Runs once per distinct directory per pass, not once per session, which is
+   * what makes the extra UNC stats affordable - 55 directories on this machine.
+   */
+  const projectExists = (path: string): boolean => {
+    const resolved = resolveRecordedPath(path, distros, directoryExists)
+    return resolved !== null && directoryExists(resolved)
+  }
 
   let last: HistorySummary = {
     sessions: 0,
@@ -98,17 +144,46 @@ export function createHistoryService({
     resumable: 0,
     latestAt: null,
     historyFile: file,
+    historyFiles: [file],
     indexedBytes: historyCursor(store, file)
   }
-  let watcher: FSWatcher | null = null
+  let watchers: FSWatcher[] = []
   let poll: NodeJS.Timeout | null = null
   let debounce: NodeJS.Timeout | null = null
-  let lastSize = -1
+  let lastSizes = new Map<string, number>()
 
   function refresh(): HistorySummary {
-    const tail = readHistoryTail(file, historyCursor(store, file))
-    const transcripts = scanTranscripts(projectsDir)
-    const next = indexHistory(store, { file, tail, transcripts, directoryExists })
+    /**
+     * A reset in any source re-reads every source from zero.
+     *
+     * `indexHistory` empties both tables when it sees one, because the rows do
+     * not record which file they came from - so the sources that did *not*
+     * reset would be wiped and then only topped up from their cursors, leaving
+     * the index holding the tail of a file and calling it the whole of it. One
+     * extra full read of a 1.2 MB file, on the rare pass where a history file
+     * has been rotated or deleted, is the price of not needing a column that
+     * would have to be right about rows written before it existed.
+     */
+    let sources = homes.map((where) => {
+      const path = historyFileIn(where)
+      return { file: path, tail: readHistoryTail(path, historyCursor(store, path)) }
+    })
+    if (sources.some((source) => source.tail.reset) && sources.length > 1) {
+      sources = sources.map((source) => ({
+        file: source.file,
+        tail: source.tail.reset ? source.tail : readHistoryTail(source.file, 0)
+      }))
+    }
+
+    // One map across every home. Session ids are UUIDs, so the merge is a
+    // union with no key to reconcile, and the archive downstream wants the
+    // same single answer to "what can still be opened".
+    const transcripts = new Map<string, TranscriptFile>()
+    for (const where of homes) {
+      for (const [id, found] of scanTranscripts(projectsDirIn(where))) transcripts.set(id, found)
+    }
+
+    const next = indexHistory(store, { sources, transcripts, directoryExists: projectExists })
     const changed =
       next.sessions !== last.sessions ||
       next.prompts !== last.prompts ||
@@ -145,28 +220,65 @@ export function createHistoryService({
     }, DEBOUNCE_MS)
   }
 
+  /**
+   * One watch per home, rebuilt whenever the list of homes changes.
+   *
+   * **A distro's home never gets one.** Measured 2026-09-03: `fs.watch` over a
+   * `\\wsl$\` path throws `EISDIR` immediately - on the directory, on the
+   * directory recursively, and on the file itself - so the 9P share behind it
+   * carries no change notification of any kind. That is caught below and the
+   * home is simply left to the poll, which is the mechanism this was written
+   * around anyway: it stats every file and trusts no watch. The visible
+   * consequence is that a prompt typed in a distro reaches the launcher within
+   * the poll interval rather than within the debounce.
+   */
+  function rewatch(): void {
+    for (const open of watchers) open.close()
+    watchers = []
+    for (const path of filesOf()) {
+      try {
+        // Non-recursive: the directory holds the whole `.claude` tree, and a
+        // recursive watch over `projects/` would fire on every token a live
+        // session writes to its transcript.
+        const open = watch(dirname(path), { persistent: false }, (_event, name) => {
+          if (name === null || basename(String(name)) === basename(path)) scheduleRefresh()
+        })
+        open.on('error', () => {
+          open.close()
+          watchers = watchers.filter((held) => held !== open)
+        })
+        watchers.push(open)
+      } catch {
+        // Left to the poll.
+      }
+    }
+  }
+
+  let started = false
+
   return {
     file,
     refresh,
     summary: () => last,
 
-    start() {
-      if (watcher !== null || poll !== null) return
+    useHomes(next) {
+      // This machine's home is always the head and is never one of these, so a
+      // distro whose `$HOME` somehow resolved to it cannot be indexed twice.
+      const added = next.filter(
+        (home) => !homes.some((held) => held.toLowerCase() === home.claudeHome.toLowerCase())
+      )
+      if (added.length === 0) return
+      homes = [...homes, ...added.map((home) => home.claudeHome)]
+      distros = [...distros, ...added]
+      if (!started) return
+      rewatch()
+      scheduleRefresh()
+    },
 
-      try {
-        // Non-recursive: the directory holds the whole `.claude` tree, and a
-        // recursive watch over `projects/` would fire on every token a live
-        // session writes to its transcript.
-        watcher = watch(dirname(file), { persistent: false }, (_event, name) => {
-          if (name === null || basename(String(name)) === basename(file)) scheduleRefresh()
-        })
-        watcher.on('error', () => {
-          watcher?.close()
-          watcher = null
-        })
-      } catch {
-        // Left to the poll.
-      }
+    start() {
+      if (started) return
+      started = true
+      rewatch()
 
       let ticks = 0
       poll = setInterval(() => {
@@ -174,14 +286,19 @@ export function createHistoryService({
         // Size, not mtime: an append always changes it, and a stat that reports
         // no change costs nothing further. A file that cannot be stat'd reads
         // as -1, which is a change the next pass will report as an error.
-        let size: number
-        try {
-          size = statSync(file).size
-        } catch {
-          size = -1
+        let moved = false
+        for (const path of filesOf()) {
+          let size: number
+          try {
+            size = statSync(path).size
+          } catch {
+            size = -1
+          }
+          if (lastSizes.get(path) === size) continue
+          lastSizes.set(path, size)
+          moved = true
         }
-        if (size !== lastSize) {
-          lastSize = size
+        if (moved) {
           scheduleRefresh()
           return
         }
@@ -196,12 +313,14 @@ export function createHistoryService({
     },
 
     stop() {
+      started = false
       if (debounce) clearTimeout(debounce)
       debounce = null
       if (poll) clearInterval(poll)
       poll = null
-      watcher?.close()
-      watcher = null
+      for (const open of watchers) open.close()
+      watchers = []
+      lastSizes = new Map()
     }
   }
 }

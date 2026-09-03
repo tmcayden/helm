@@ -216,6 +216,60 @@ export function readSessionRegistry(
 }
 
 /**
+ * A registry whose pids belong to another kernel, read without a liveness test.
+ *
+ * A session hosted in a WSL distribution registers in *that* distro's
+ * `~/.claude/sessions`, and the `pid` in the record is a **Linux** pid. Probing
+ * it here is not merely useless, it is unsafe in the direction that matters:
+ * the number would be tested against this machine's process table, where it
+ * either matches nothing - dropping a session that is running - or matches an
+ * unrelated Windows process and reports a dead conversation as live. The dot
+ * saying "busy" about a session that has exited is the one failure the liveness
+ * filter exists to prevent, so the probe is refused rather than approximated.
+ *
+ * Asking the distro instead would be a `wsl.exe` per pass on a 750ms timer,
+ * which is the budget rule in CLAUDE.md turned inside out - the process
+ * enumeration is watch-gated at 4s for costing 400ms, and this would be worse.
+ *
+ * So liveness comes from somewhere better: **the caller must join every record
+ * returned here to a session it is itself hosting**, and a hosted session is
+ * live because Helm holds the relay's pty and reaps it. A record that joins to
+ * nothing is dropped by the caller, which is why nothing stale can be painted
+ * from one of these. The consequence, stated rather than hidden, is that a
+ * `claude` somebody started in a distro's own terminal is not in the
+ * machine-wide listing; `readSessionRegistry` is still the only thing that
+ * lists a session Helm did not spawn.
+ *
+ * The `.json` filter is the same credential boundary, for the same reason.
+ */
+export function readForeignSessionRegistry(dir: string): SessionRegistryEntry[] {
+  let files: string[]
+  try {
+    files = readdirSync(dir).filter((name) => name.toLowerCase().endsWith('.json'))
+  } catch {
+    return []
+  }
+
+  const entries: SessionRegistryEntry[] = []
+  for (const file of files) {
+    let text: string
+    try {
+      text = readFileSync(join(dir, file), 'utf8')
+    } catch {
+      continue
+    }
+    // Prefixed so two distros - or a distro and this machine - cannot produce
+    // one identity from two records. The file name is the record's identity
+    // everywhere downstream (`claimed`, and the pane's key), and `4068.json`
+    // is a name every kernel on the machine can mint.
+    const entry = parseRegistryRecord(`${dir}#${file}`, text)
+    if (entry === null) continue
+    entries.push(entry)
+  }
+  return entries
+}
+
+/**
  * What Helm knows about one of its own sessions, as a key into the registry.
  *
  * `pinned` is the interesting half and it is why this is not a one-liner. The
@@ -240,6 +294,12 @@ export interface RegistryJoin {
   ptyPid: number | null
   /** Learned from a previous join and authoritative once it is set. */
   pinned: { pid: number; procStart: string | null } | null
+  /**
+   * The same thing for a session inside a WSL distribution, whose record
+   * carries a Linux pid this machine has no process table for. Set instead of
+   * `pinned`, never as well, and it wins outright the way `pinned` does.
+   */
+  pinnedFile?: string | null
 }
 
 /**
@@ -254,7 +314,22 @@ export function joinSessionRegistry(
   entries: readonly SessionRegistryEntry[],
   join: RegistryJoin
 ): SessionRegistryEntry | null {
-  const { pinned, claudeSessionId, ptyPid } = join
+  const { pinnedFile, pinned, claudeSessionId, ptyPid } = join
+
+  /*
+   * A record pinned by its own file name, which is what a foreign registry has
+   * instead of a probeable pid.
+   *
+   * The file is `<pid>.json` and the CLI rewrites it in place - a `/clear`
+   * re-registers the same process under a new conversation id and the same
+   * name, which is the case the pid pin exists for and the only reason this
+   * cannot simply be the conversation id every pass. `readForeignSessionRegistry`
+   * prefixes the directory, so a pid two distros both happen to hold is two
+   * names here rather than one.
+   */
+  if (pinnedFile !== null && pinnedFile !== undefined) {
+    return entries.find((e) => e.file === pinnedFile) ?? null
+  }
 
   if (pinned !== null) {
     // `procStart` compared including the null case: two records for one pid

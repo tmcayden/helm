@@ -4,11 +4,15 @@ import { parse, stringify } from 'yaml'
 import {
   EFFORT_LEVELS,
   PERMISSION_MODES,
+  formatLaunchTarget,
+  parseLaunchTarget,
   type EffortLevel,
   type PermissionMode,
+  type LaunchTarget,
   type Profile,
   type ProfileDraft
 } from '../types'
+
 
 /**
  * A profile as a file, so it can travel with a harness (SPEC 3).
@@ -40,6 +44,18 @@ interface ProfileDocument {
   agent?: unknown
   mcp?: unknown
   opening_prompt?: unknown
+  target?: unknown
+}
+
+/**
+ * `target:` on the wire, through the same codec the `target` column uses.
+ *
+ * A value this cannot read is dropped rather than fatal, which is this file's
+ * rule for every other field: a distro named in a file from another machine is
+ * a setting to fix in the editor, not a refusal to import.
+ */
+function asTarget(value: unknown): LaunchTarget | null {
+  return parseLaunchTarget(typeof value === 'string' ? value : null)
 }
 
 /** `~` for the home directory, as the spec's example writes it. */
@@ -84,7 +100,8 @@ export function profileToYaml(profile: ProfileDraft): string {
     permission_mode: profile.permissionMode,
     agent: profile.agent,
     mcp: profile.mcp,
-    opening_prompt: profile.openingPrompt
+    opening_prompt: profile.openingPrompt,
+    target: formatLaunchTarget(profile.target)
   }
   // `null` rather than an omitted key for the unset ones: the export doubles as
   // the format a person edits by hand, and a listed key with a null value shows
@@ -149,7 +166,8 @@ export function profileFromYaml(text: string): ProfileDraft {
     agent: asNullableString(doc.agent),
     mcp: asStringArray(doc.mcp),
     openingPrompt: asNullableString(doc.opening_prompt),
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: asTarget(doc.target)
   }
 }
 
@@ -166,7 +184,8 @@ export function profileDraft(profile: Profile): ProfileDraft {
     agent: profile.agent,
     mcp: profile.mcp,
     openingPrompt: profile.openingPrompt,
-    pinnedOrder: profile.pinnedOrder
+    pinnedOrder: profile.pinnedOrder,
+    target: profile.target
   }
 }
 
@@ -187,6 +206,13 @@ export function validateProfile(draft: ProfileDraft): string[] {
   }
   if (draft.permissionMode !== null && !PERMISSION_MODES.includes(draft.permissionMode)) {
     problems.push(`Permission mode must be one of ${PERMISSION_MODES.join(', ')}.`)
+  }
+  // A target names a distro that has to exist *at launch*, not now: one can be
+  // installed, renamed or removed between saving a profile and running it, so
+  // this checks the shape and leaves existence to the launch, which is where a
+  // useful sentence about it can be written.
+  if (draft.target !== null && draft.target.kind === 'wsl' && draft.target.distro.trim() === '') {
+    problems.push('A WSL target needs a distribution name.')
   }
   return problems
 }

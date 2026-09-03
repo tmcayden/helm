@@ -1,5 +1,5 @@
 import type { JSX, KeyboardEvent, ReactNode } from 'react'
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   ArchiveMessage,
   ArchiveStats,
@@ -1021,13 +1021,38 @@ function HistoryRename({
   onDone: (name: string | null | undefined) => void
 }): JSX.Element {
   const [value, setValue] = useState(initial)
+  const field = useRef<HTMLInputElement>(null)
+
+  /**
+   * Focused **and selected** on mount, from a layout effect rather than from
+   * `autoFocus` alone.
+   *
+   * The field opens holding the name this session already has, so whether its
+   * contents are selected is the difference between typing a new name and
+   * appending to the old one. `autoFocus` with `onFocus={select()}` was
+   * supposed to do it and measurably did not: `history-check`'s HIST-10 read
+   * the field the moment it opened and found zero characters selected, which is
+   * a rename that silently produces `<old title><what you typed>`.
+   *
+   * Before the layout effect, `select()` had exactly one chance to run - the
+   * focus event React fires during commit - and anything that consumed or
+   * pre-empted that event left the caret at a collapsed position with no second
+   * attempt. This asks for both explicitly, after the DOM node exists, and
+   * `onFocus` stays for every later focus.
+   */
+  useLayoutEffect(() => {
+    const el = field.current
+    if (el === null) return
+    el.focus()
+    el.select()
+  }, [])
 
   return (
     <input
+      ref={field}
       data-history-name
       aria-label="Name this session"
       value={value}
-      autoFocus
       maxLength={HISTORY_NAME_MAX}
       onFocus={(event) => event.currentTarget.select()}
       onChange={(event) => setValue(event.target.value)}

@@ -1,5 +1,6 @@
 import { asc, eq, sql } from 'drizzle-orm'
 import type { EffortLevel, PermissionMode, Profile, ProfileDraft } from '../types'
+import { formatLaunchTarget, parseLaunchTarget } from '../types'
 import type { Store } from './db'
 import { profiles } from './schema'
 
@@ -28,6 +29,7 @@ function toProfile(row: Row): Profile {
     mcp: row.mcp,
     openingPrompt: row.openingPrompt,
     pinnedOrder: row.pinnedOrder,
+    target: parseLaunchTarget(row.target),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   }
@@ -45,7 +47,12 @@ function toValues(draft: ProfileDraft): Omit<Row, 'id' | 'createdAt' | 'updatedA
     agent: draft.agent,
     mcp: draft.mcp,
     openingPrompt: draft.openingPrompt,
-    pinnedOrder: draft.pinnedOrder
+    pinnedOrder: draft.pinnedOrder,
+    // Written out even for Windows rather than left null. A null means "a row
+    // from before targets existed", and that is a different fact from "this
+    // profile chose Windows" - they launch the same, but only one of them is
+    // something the user decided.
+    target: formatLaunchTarget(draft.target)
   }
 }
 

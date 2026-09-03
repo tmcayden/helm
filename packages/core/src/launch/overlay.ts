@@ -409,6 +409,24 @@ function removeShimDir(dir: string): void {
     try {
       link = lstatSync(path).isSymbolicLink()
     } catch {
+      /*
+       * A link that leads nowhere - `lstat` answers ENOENT on one, measured.
+       *
+       * Skipping it is not enough: the entry is still in the directory, so the
+       * `rmSync` below finds something it cannot delete and throws ENOTEMPTY,
+       * and a sweep that throws leaves every later shim unswept. `rmdirSync`
+       * unlinks it, and cannot reach through anything - on a real directory
+       * with contents it throws, which the outer `rmSync` then handles.
+       *
+       * Builds after 2026-09-02 do not create these: `link` verifies the
+       * junction resolves before keeping it. This is for the ones that already
+       * exist on a machine that ran an earlier build against a WSL overlay.
+       */
+      try {
+        rmdirSync(path)
+      } catch {
+        // Not a dead link after all. Left to the recursive delete.
+      }
       continue
     }
     if (!link) continue
@@ -439,15 +457,42 @@ function removeShimDir(dir: string): void {
  * user's to fix - the shim root landing on a filesystem that has no reparse
  * points, most plausibly a network share or a FAT-formatted stick, which is a
  * real case for an app whose whole premise is being portable.
+ *
+ * **The link is verified rather than assumed, and that is not belt and braces.**
+ * Measured 2026-09-02: a junction whose target is a UNC path - which every
+ * project inside a WSL distribution has, `\\wsl$\Ubuntu\home\me\work` - is
+ * created **successfully** and then resolves to nothing. `symlinkSync` does not
+ * throw, so a `catch`-only fallback never fires; `lstat`, `realpath` and
+ * `readdir` all answer ENOENT afterwards. NTFS junctions cannot target a UNC
+ * path, and the reparse point is written anyway.
+ *
+ * Trusting the call therefore produced the one outcome this whole module exists
+ * to prevent: a `--plugin-dir` pointing at a dead link, and a session that
+ * silently composes nothing. One `existsSync` is what stands between those.
+ *
+ * The check is on the *result* rather than on the shape of the target, so it
+ * also covers whatever else turns out to behave this way - a junction across
+ * filesystems, a target that disappears between the two calls - without this
+ * function having to know the list.
  */
 function link(target: string, path: string): 'junction' | 'copy' {
   try {
     symlinkSync(target, path, 'junction')
-    return 'junction'
+    // Follows the reparse point: false is a link that leads nowhere, which is
+    // what a UNC target produces.
+    if (existsSync(path)) return 'junction'
+    // `rmdirSync` unlinks a junction rather than descending through it - the
+    // same property `removeShim` relies on - and is measured to remove a dead
+    // one. It has to go before the copy, which cannot write over it.
+    rmdirSync(path)
   } catch {
-    cpSync(target, path, { recursive: true, dereference: true })
-    return 'copy'
+    // Either the junction could not be made at all, or the dead one could not
+    // be cleared. The copy below is the answer to the first; for the second it
+    // will throw in turn, which is the honest outcome - a shim that cannot be
+    // built must not be reported as built.
   }
+  cpSync(target, path, { recursive: true, dereference: true })
+  return 'copy'
 }
 
 export interface SyncedOverlay {

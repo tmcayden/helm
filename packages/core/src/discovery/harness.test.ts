@@ -140,6 +140,28 @@ describe('createHarness', () => {
     const result = await createHarness({ mode: 'convert', dir: root })
     expect(result.path).toBeNull()
     expect(result.problems).toEqual([`${root} is already a harness.`])
+    // Names the harness that is already there, so the caller can add its root
+    // rather than showing an error about a folder the launcher does not list -
+    // which is what a WSL harness looks like, since no root ever covers one.
+    expect(result.existing).toBe(root)
+  })
+
+  it('reports no existing harness for any other refusal', async () => {
+    const missing = join(root, 'not-here')
+    const notAFolder = await createHarness({ mode: 'convert', dir: missing })
+    expect(notAFolder.path).toBeNull()
+    expect(notAFolder.existing).toBeNull()
+
+    // `new` over a directory that is already a harness stays a refusal with
+    // nothing to adopt: the request named a folder to create, and one being
+    // there is a collision rather than the thing that was asked for.
+    const taken = join(root, 'taken')
+    await mkdir(taken, { recursive: true })
+    await writeFile(join(taken, 'harness.yaml'), 'name: "taken"\n')
+    const collision = await createHarness({ mode: 'new', dir: root, name: 'taken' })
+    expect(collision.path).toBeNull()
+    expect(collision.problems).toEqual([`${taken} is already a harness.`])
+    expect(collision.existing).toBeNull()
   })
 })
 

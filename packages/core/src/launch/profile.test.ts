@@ -17,7 +17,8 @@ const sample: ProfileDraft = {
   agent: null,
   mcp: ['clickup'],
   openingPrompt: '/recap',
-  pinnedOrder: null
+  pinnedOrder: null,
+  target: null
 }
 
 describe('profileToYaml', () => {
@@ -68,7 +69,8 @@ describe('profileFromYaml', () => {
       agent: null,
       mcp: [],
       openingPrompt: null,
-      pinnedOrder: null
+      pinnedOrder: null,
+      target: null
     }
     expect(profileFromYaml(profileToYaml(bare))).toEqual(bare)
   })

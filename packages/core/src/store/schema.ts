@@ -44,6 +44,15 @@ export const profiles = sqliteTable(
     openingPrompt: text('opening_prompt'),
     /** Launcher ordering; null means unpinned. */
     pinnedOrder: integer('pinned_order'),
+    /**
+     * Where this profile's sessions run: null or `windows`, or `wsl:<distro>`.
+     *
+     * One text column rather than two, and nullable, because every row written
+     * before this existed means Windows - which is exactly what a null reads
+     * back as. The same spelling the YAML export uses, so the column and the
+     * file are not two formats for one fact.
+     */
+    target: text('target'),
     createdAt: text('created_at').notNull().default(now),
     updatedAt: text('updated_at').notNull().default(now)
   },

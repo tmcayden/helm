@@ -49,7 +49,10 @@ export interface SetupState {
   creating: boolean
   openDialog: (mode: HarnessDialogMode) => void
   closeDialog: () => void
-  chooseDialogDir: () => void
+  /** Opens the folder picker. `startIn` opens it inside a distribution. */
+  chooseDialogDir: (startIn?: string) => void
+  /** The WSL distributions, for the picker shortcuts. Empty without WSL. */
+  distros: Array<{ distro: string; home: string }>
   /** The dialog owns its mode once open; the preview has to follow it. */
   setDialogMode: (mode: HarnessDialogMode) => void
   createHarness: (request: {
@@ -95,6 +98,7 @@ export function useSetup(
   const [templateProblems, setTemplateProblems] = useState<string[]>([])
   const [template, setTemplate] = useState(MINIMAL)
   const [templatePreview, setTemplatePreview] = useState<TemplatePreview | null>(null)
+  const [distros, setDistros] = useState<Array<{ distro: string; home: string }>>([])
 
   /** The button. Shows a spinner, because the user asked and is waiting. */
   const recheck = useCallback(() => {
@@ -191,6 +195,25 @@ export function useSetup(
       // can add while Helm is running, and a list fetched once at startup would
       // be stale for the rest of the session.
       refreshTemplates()
+      /*
+       * The distributions, for the picker shortcuts beside "Choose…".
+       *
+       * On open rather than at mount, the same rule the WSL settings group
+       * learned the hard way: nothing about WSL is read until somebody opens a
+       * surface that shows it. This one is free either way - the homes are
+       * memoised and the app has already asked for them - but a channel called
+       * on mount is a channel that gets asked on every launch, and the reason
+       * it is cheap today is not a reason to depend on it staying cheap.
+       *
+       * An empty list on failure: no WSL is the ordinary answer, and a machine
+       * without it simply gets the one button it had before.
+       */
+      void helm
+        .invoke('wsl:homes')
+        .catch(() => [])
+        .then((homes) => {
+          setDistros(homes.map((entry) => ({ distro: entry.distro, home: entry.home })))
+        })
     },
     [settings, refreshTemplates]
   )
@@ -224,10 +247,11 @@ export function useSetup(
     setTemplatePreview(null)
   }, [])
 
-  const chooseDialogDir = useCallback(() => {
+  const chooseDialogDir = useCallback((startIn?: string) => {
     void helm
       .invoke('path:chooseDirectory', {
-        title: dialog === 'convert' ? 'Choose the folder to convert' : 'Create the harness inside'
+        title: dialog === 'convert' ? 'Choose the folder to convert' : 'Create the harness inside',
+        ...(startIn === undefined ? {} : { startIn })
       })
       .then(({ path }) => {
         if (path !== null) setDialogDir(path)
@@ -246,6 +270,20 @@ export function useSetup(
           ...(request.mode === 'new' ? { template: request.template } : {})
         })
         .then((result) => {
+          /*
+           * Already a harness, and now a listed one.
+           *
+           * Treated as the success it is rather than as the refusal it reads
+           * like: main added the root in the same call, so the folder is in the
+           * tree behind this dialog. Closing is what makes that visible - the
+           * old behaviour left an error on screen about a harness the launcher
+           * genuinely did not show, which is the state a user cannot act on.
+           */
+          if (result.path === null && result.existing !== null) {
+            onRootsChanged()
+            closeDialog()
+            return
+          }
           if (result.path === null) {
             setDialogProblems(result.problems)
             return
@@ -304,6 +342,7 @@ export function useSetup(
     openDialog,
     closeDialog,
     chooseDialogDir,
+    distros,
     setDialogMode,
     createHarness,
     templates,

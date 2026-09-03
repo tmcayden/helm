@@ -1,6 +1,8 @@
 import { type BrowserWindow, dialog, ipcMain, Notification } from 'electron'
+import { homedir } from 'node:os'
 import { basename } from 'node:path'
 import {
+  launchTarget,
   buildResumeArgs,
   finishSession,
   historyTitle,
@@ -20,18 +22,25 @@ import {
   writeSessionMcpConfig,
   type LaunchedReviewPlan,
   type LaunchPlan,
+  type LaunchTarget,
   type SessionMcpServer,
-  type SessionRecord
+  type SessionRecord,
+  WINDOWS_TARGET,
+  isLinuxPath,
+  toWindowsPath,
+  wslDistroOf
 } from '@helm/core'
 import type { BrowserMcpHost } from './browser-mcp'
 import {
   claudePtyArgs,
   readClaudeSupportsSessionId,
-  resolveClaudeCommand
+  resolveClaudeCommand,
+  type ClaudeCommand
 } from './claude-cli'
 import { emit } from './ipc'
 import { shimRoot } from './paths'
 import { killAllSessionsSync, killSession, spawnSession, type SessionHandle } from './pty'
+import { describeWslDistro, unreachableEndpointNote, wslClaudeCommand } from './wsl'
 import type { Services } from './services'
 import type {
   CloseSessionRequest,
@@ -59,6 +68,15 @@ import type {
 interface Hosted {
   record: SessionRecord
   handle: SessionHandle
+  /**
+   * Where this session is running, which the row does not record.
+   *
+   * Held in memory rather than added as a column because the one thing that
+   * asks is the activity pass, which only ever asks about a session this
+   * process is hosting: it decides which `~/.claude/sessions` the session's
+   * record is in, and a session that is not running has no record anywhere.
+   */
+  target: LaunchTarget
   /**
    * The tab is gone but the process may not be yet. Kept rather than deleted so
    * that the exit still reaches the database: dropping the entry at close time
@@ -228,6 +246,12 @@ export interface SessionHost {
   grid: (id: number) => { cols: number; rows: number } | null
   /** OS process id, for asserting a session is really gone. */
   pid: (id: number) => number | null
+  /**
+   * Where a hosted session is running, so the activity pass knows which
+   * `~/.claude/sessions` its record is in. Null for a session this process is
+   * not hosting, which has no record anywhere.
+   */
+  target: (id: number) => LaunchTarget | null
   /**
    * The session a bearer token was minted for, or null.
    *
@@ -448,6 +472,89 @@ export function createSessionHost({
   }
 
   /**
+   * A working directory this process can actually start a program in.
+   *
+   * The session's own directory for anything on this machine. Two shapes fall
+   * back to the user's home instead, and `--cd` is what puts the session where
+   * it belongs in both:
+   *
+   *   `\\wsl$\Ubuntu\home\me\work`  a path inside a distro. Windows has no
+   *                                 directory there that `CreateProcess` will
+   *                                 accept - measured, it answers ENOENT.
+   *   `/home/me/work`               a **resumed** distro session, whose working
+   *                                 directory was recorded by the CLI that had
+   *                                 the conversation and is therefore
+   *                                 Linux-spelled. `path.win32` would resolve
+   *                                 the leading slash against the current
+   *                                 drive root and start the session in
+   *                                 `C:\home\me\work`, which is not a failure
+   *                                 anybody could read - it is a session in the
+   *                                 wrong place, or one that will not start.
+   *
+   * Deliberately not silent about which is which: the session **row** keeps
+   * `plan.cwd`, because the honest answer to "where is this session working" is
+   * the project, not wherever the relay happened to be launched from.
+   */
+  const hostCwd = (cwd: string): string =>
+    wslDistroOf(cwd) === null && !isLinuxPath(cwd) ? cwd : homedir()
+
+  /**
+   * Which CLI to hand a `--resume` to, from the transcript it will open.
+   *
+   * A transcript under `\\wsl$\<distro>\...\.claude\projects` was written by
+   * that distro's CLI and can only be reopened by it. Everything else - a path
+   * on this machine, and the null of a row whose transcript has been reaped
+   * (which `resume` refuses before reaching here) - is Windows, which is what
+   * this whole path did unconditionally before a distro's history was indexed.
+   */
+  const resumeTarget = (transcriptFile: string | null): LaunchTarget => {
+    const distro = transcriptFile === null ? null : wslDistroOf(transcriptFile)
+    return distro === null ? WINDOWS_TARGET : { kind: 'wsl', distro }
+  }
+
+  /**
+   * The distro's own `claude`, as a command the pty can open.
+   *
+   * Throws rather than degrading, and that is the one place a WSL target is
+   * stricter than a Windows one. A missing Windows CLI is a machine somebody
+   * can fix from the settings pane and every other surface still works without
+   * it; a WSL target with no CLI inside the distro is a launch that was asked
+   * for explicitly and cannot happen, so it says which distro and what to
+   * install rather than opening a pty that closes.
+   */
+  const wslCommandFor = async (distro: string, cwd: string): Promise<ClaudeCommand> => {
+    const probe = await describeWslDistro(distro, browserMcp?.()?.address()?.port ?? null)
+    if (probe.claudePath === null) {
+      throw new Error(probe.problem ?? `No \`claude\` inside ${distro}.`)
+    }
+    return wslClaudeCommand(distro, probe.claudePath, cwd)
+  }
+
+  /**
+   * Whether a target can have Helm's own tools, and what to say when it cannot.
+   *
+   * Asked **before** the token is minted, because minting one for a session
+   * that can never reach the endpoint would leave a live credential nothing can
+   * use - and the `--mcp-config` naming it would send the CLI looking for a
+   * server that never answers. A Windows target is always allowed; this is
+   * entirely about the measured fact that a distro on default NAT networking
+   * cannot see this machine's loopback.
+   */
+  const toolsGate = async (
+    target: LaunchTarget
+  ): Promise<{ allowed: boolean; note: string | null }> => {
+    if (target.kind !== 'wsl') return { allowed: true, note: null }
+    const port = browserMcp?.()?.address()?.port ?? null
+    // No endpoint at all - both tool settings off - is not a WSL problem and
+    // must not produce a sentence blaming WSL for it.
+    if (port === null) return { allowed: false, note: null }
+    const probe = await describeWslDistro(target.distro, port)
+    return probe.endpointReachable
+      ? { allowed: true, note: null }
+      : { allowed: false, note: unreachableEndpointNote(target.distro) }
+  }
+
+  /**
    * The one path a session is spawned by, whether it came from a project row or
    * from a profile. Both produce a `LaunchPlan` first - the only difference
    * between them is how many flags ended up in it.
@@ -461,7 +568,20 @@ export function createSessionHost({
     origin: { projectPath?: string | null | undefined; profileId?: number | null | undefined },
     mcpToken: string | null = null
   ): Promise<SessionRecord> {
-    const command = resolveClaudeCommand()
+    /*
+     * Which `claude` this session runs, and therefore which program the pty
+     * opens.
+     *
+     * A WSL target does not resolve on this machine at all: the CLI is the
+     * distro's, discovered inside it, and the program is `wsl.exe` with that
+     * path behind `--`. Everything after this line is unchanged for both -
+     * which is the design, and why the branch is one `if` rather than a second
+     * spawn path.
+     */
+    const command =
+      plan.target.kind === 'wsl'
+        ? await wslCommandFor(plan.target.distro, plan.cwd)
+        : resolveClaudeCommand()
     if (!command) {
       throw new Error(
         'Claude Code CLI not found. Install it (or put `claude` on PATH) and restart Helm.'
@@ -525,7 +645,20 @@ export function createSessionHost({
         args: claudePtyArgs(command, plan.argv),
         cols: Math.max(grid.cols, 1),
         rows: Math.max(grid.rows, 1),
-        cwd: plan.cwd,
+        /*
+         * The directory *this* process starts the program in, which is not
+         * always the directory the session runs in.
+         *
+         * For a project inside a distro those are two different places, and the
+         * distinction is load-bearing: `CreateProcess` cannot take a UNC
+         * working directory at all - it answers ENOENT, measured 2026-09-02 -
+         * so handing `\\wsl$\Ubuntu\...` to node-pty fails the spawn before
+         * `wsl.exe` ever runs. The session's real working directory is carried
+         * by `--cd` in `wslClaudeCommand`, which the relay honours; where the
+         * pty itself starts is then irrelevant, so it starts somewhere this
+         * process can certainly chdir to.
+         */
+        cwd: hostCwd(plan.cwd),
         onData: (data) => {
           emit(window(), 'session:data', { id: record.id, data })
           observer?.onOutput?.(record.id, data)
@@ -546,6 +679,7 @@ export function createSessionHost({
       record,
       handle,
       closed: false,
+      target: plan.target,
       mcpToken,
       mcpConfigFile: plan.mcpConfigFile
     })
@@ -577,12 +711,17 @@ export function createSessionHost({
       // sessions from one profile is the normal case, and `/resume` shows only
       // the name.
       const name = uniqueSessionName(profile.name, takenNames())
-      const tools = registerBrowserTools(name)
+      const gate = await toolsGate(launchTarget(profile.target))
+      const tools = gate.allowed ? registerBrowserTools(name) : null
       const plan = prepareLaunch({
         ...launchRequestFromProfile(profile, shimRoot, name),
         mcp: tools?.mcp ?? null,
         sessionId: await mintSessionId()
       })
+      // On the plan's own warnings rather than a channel of its own: the launch
+      // already has a place for "something you should know that did not stop
+      // this", and the pane already paints it.
+      if (gate.note !== null) plan.warnings.push(gate.note)
       attachBrowserTools(tools?.token ?? null, plan.mcpConfigFile)
 
       // The overlay work happens before the row exists, so a profile pointing
@@ -649,9 +788,31 @@ export function createSessionHost({
         tools === null ? null : writeSessionMcpConfig(tools.mcp.dir, tools.mcp.servers)
       attachBrowserTools(tools?.token ?? null, mcpConfigFile)
 
+      /*
+       * The recorded directory, in the spelling the rest of Helm uses.
+       *
+       * A distro's CLI wrote down `/home/me/harness`, because that is what it
+       * saw. Everything downstream here is a Windows process reading a Windows
+       * path - the git branch on the row, `hostCwd`, the sessions pane - and a
+       * bare `/home/...` is not one: `path.win32` resolves the leading slash
+       * against the current drive root. Translated once, at the only point that
+       * knows which distro wrote it, a resumed distro session is then
+       * indistinguishable from one launched into that distro, and needed no
+       * special case anywhere below.
+       *
+       * `toWindowsPath` answers null for a path that is already this machine's,
+       * which is what a `/mnt/c` session records - so that falls through to the
+       * recorded path unchanged, which is already right.
+       */
+      const target = resumeTarget(history.transcriptFile)
+      const cwd =
+        target.kind === 'wsl'
+          ? (toWindowsPath(history.project, { distro: target.distro }) ?? history.project)
+          : history.project
+
       const session = await spawn(
         {
-          cwd: history.project,
+          cwd,
           name: label,
           argv: buildResumeArgs(history.sessionId, mcpConfigFile),
           overlays: [],
@@ -666,6 +827,26 @@ export function createSessionHost({
            * exists, which the CLI refuses outright.
            */
           claudeSessionId: history.sessionId,
+          /*
+           * Whose CLI had this conversation, read off the transcript's path.
+           *
+           * `history.jsonl` records a project directory and a conversation id
+           * and says nothing about where the CLI that wrote them was running -
+           * which is why this used to be Windows unconditionally, and why
+           * guessing from `history.project` would still be wrong: a session run
+           * *inside* a distro against `/mnt/c/work` records a `C:\work`-shaped
+           * project and belongs to the distro all the same.
+           *
+           * The transcript file is the evidence the project path is not. It is
+           * the file `--resume` will open, it is under the `~/.claude/projects`
+           * of the CLI that wrote it, and the index now reads a distro's
+           * alongside this machine's - so a transcript at
+           * `\\wsl$\Ubuntu\...\projects\...` is Ubuntu's conversation by
+           * construction rather than by inference. Resuming it anywhere else
+           * fails with "No conversation found" and no indication why, which is
+           * exactly what this avoids.
+           */
+          target,
           warnings: []
         },
         req,
@@ -780,6 +961,8 @@ export function createSessionHost({
     grid: (id) => grids.get(id) ?? null,
 
     pid: (id) => hosted.get(id)?.handle.pid ?? null,
+
+    target: (id) => hosted.get(id)?.target ?? null,
 
     tokenHolder(token) {
       // A running session only. A token is revoked when its session ends, so

@@ -27,6 +27,21 @@ export interface ClaudeCommand {
   file: string
   /** Arguments that must precede the subcommand, e.g. a script path. */
   prefixArgs?: readonly string[] | undefined
+  /**
+   * Where the *host* process is started, when that is not the directory the
+   * command is about.
+   *
+   * The two are the same for a CLI on this machine and they are not for one
+   * inside a WSL distribution. There the program is `wsl.exe`, the directory
+   * the CLI works in is carried on its own argv as `--cd`, and the working
+   * directory this process may spawn with is neither: **`CreateProcess`
+   * refuses a UNC path** (ENOENT, measured 2026-09-02), so a `\\wsl$\...`
+   * project cannot be the spawn's cwd at all.
+   *
+   * Left unset by every Windows caller, which keeps the ordinary case exactly
+   * as it was.
+   */
+  hostCwd?: string | undefined
 }
 
 const TIMEOUT_MS = 60_000
@@ -179,7 +194,7 @@ async function mcp(
 ): Promise<McpRunResult> {
   try {
     const result = await run(command.file, [...(command.prefixArgs ?? []), 'mcp', ...args], {
-      cwd,
+      cwd: command.hostCwd ?? cwd,
       timeout: TIMEOUT_MS,
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024

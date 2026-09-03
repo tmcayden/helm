@@ -162,22 +162,112 @@ export interface TranscriptStat {
  * must not, because the plan does not ignore them.
  */
 export function scanUsageTranscripts(projectsDir: string): TranscriptStat[] {
-  const found: TranscriptStat[] = []
+  const found = walkUsageTranscripts(projectsDir, 4)
+  // Most recently written first: on a first index this puts the transcripts a
+  // 7-day window actually needs in front of the 26-day tail.
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  return found
+}
 
-  const walk = (dir: string, depth: number): void => {
-    // `projects/<project>/<session>/subagents/` is three below the root; the
-    // bound is here so a stray deep tree cannot turn a pass into a full walk.
-    if (depth > 4) return
+/**
+ * One directory's transcripts, so a caller can scan a tree a piece at a time.
+ *
+ * Split out of `scanUsageTranscripts` because **the whole tree is not always
+ * affordable in one go**. Measured 2026-09-03 on this machine: this machine's
+ * own `projects/` is 23 transcripts and scans in 1-2 ms, while the same
+ * directory inside a WSL distribution is 1,066 transcripts and takes
+ * **2,492-2,633 ms** over `\\wsl$\` - about 2.3 ms per `statSync` against 0.06
+ * ms locally. The usage index ran that on the main thread every ten seconds,
+ * which is a quarter of the main thread gone on any machine with WSL, and what
+ * queues behind it is pty resizes and IPC replies (CLAUDE.md, "the process pass
+ * is budgeted").
+ *
+ * `statSync` per file is unavoidable: `readdirSync` with file types says what
+ * is a file but not how big it is, and the size is what tells an append from a
+ * quiet file. So the answer is not a cheaper scan but a *bounded* one, and this
+ * is the unit the bound is applied between.
+ *
+ * `maxDepth` is counted from `dir`, so a caller starting at a project
+ * directory passes the remaining budget rather than the original one.
+ */
+export function walkUsageTranscripts(dir: string, maxDepth: number): TranscriptStat[] {
+  return walkUsageTranscriptsUntil({ dir, depth: maxDepth, from: 0 }, Infinity).found
+}
+
+/**
+ * Where a bounded walk had got to: a directory and how far into its listing.
+ *
+ * `from` is an index into `readdirSync`'s answer rather than a filename,
+ * because resuming re-lists the directory - one `readdir`, no `stat`, which is
+ * the cheap half - and an index survives that at no cost. A file created in the
+ * middle of the listing between two passes can therefore be skipped until the
+ * next round, which is the accepted price: the round after sees it, and the
+ * alternative is holding a directory's entire listing across ticks so that a
+ * transcript can be found a few seconds sooner.
+ */
+export interface UsageScanUnit {
+  dir: string
+  /**
+   * How many levels **below this directory** may still be walked.
+   *
+   * A remaining allowance, not a position in the tree, and the distinction is
+   * not academic: written as a position, a unit for `projects/<project>` said
+   * "3" meaning three more levels while the walker read it as "already three
+   * deep" and refused to descend at all. Every subagent transcript under
+   * `<project>/<session>/subagents/` was silently skipped, the index came out
+   * at 51,270 messages against 135,850, and it reported itself caught up after
+   * fifteen passes because there was so little left to find. `U-11` is what
+   * caught it, by parsing the same trees a second way.
+   */
+  depth: number
+  from: number
+}
+
+/**
+ * Walks until the deadline, and says what it did not reach.
+ *
+ * The deadline is checked **between files**, not between directories, and that
+ * is the whole point of this shape. Checking between directories bounds nothing
+ * useful: one project directory inside a distribution holds hundreds of
+ * transcripts, so a single unit overruns any budget on its own - measured at
+ * 852 ms against an 80 ms budget on the first attempt at this, which is better
+ * than the 2,357 ms it replaced and still four times what it was allowed.
+ */
+export function walkUsageTranscriptsUntil(
+  start: UsageScanUnit,
+  deadlineMs: number
+): { found: TranscriptStat[]; unfinished: UsageScanUnit[] } {
+  const found: TranscriptStat[] = []
+  // A stack rather than recursion, so what is left when the clock runs out is a
+  // value this can hand back rather than a call chain it would have to unwind.
+  const stack: UsageScanUnit[] = [start]
+
+  while (stack.length > 0) {
+    const unit = stack.pop()
+    if (unit === undefined) break
+    if (unit.depth < 0) continue
+
     let entries
     try {
-      entries = readdirSync(dir, { withFileTypes: true })
+      entries = readdirSync(unit.dir, { withFileTypes: true })
     } catch {
-      return
+      continue
     }
-    for (const entry of entries) {
-      const path = join(dir, entry.name)
+
+    let at = unit.from
+    for (; at < entries.length; at++) {
+      // At least one entry per call, always. Checked only *after* the first,
+      // because a deadline already past when the walk begins would otherwise
+      // hand back the same `from` it was given: the caller re-queues it, the
+      // next call also does nothing, and the scan livelocks having made no
+      // progress at all. Caught by the resume test, which passes exactly that
+      // deadline on purpose.
+      if (at > unit.from && performance.now() >= deadlineMs) break
+      const entry = entries[at]
+      if (entry === undefined) continue
+      const path = join(unit.dir, entry.name)
       if (entry.isDirectory()) {
-        if (!entry.isSymbolicLink()) walk(path, depth + 1)
+        if (!entry.isSymbolicLink()) stack.push({ dir: path, depth: unit.depth - 1, from: 0 })
         continue
       }
       if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
@@ -188,11 +278,36 @@ export function scanUsageTranscripts(projectsDir: string): TranscriptStat[] {
         continue
       }
     }
+
+    if (at < entries.length) {
+      // Out of time part way through this directory. It goes back with the
+      // offset, and everything still stacked behind it comes back untouched.
+      return { found, unfinished: [{ dir: unit.dir, depth: unit.depth, from: at }, ...stack] }
+    }
   }
 
-  walk(projectsDir, 0)
-  // Most recently written first: on a first index this puts the transcripts a
-  // 7-day window actually needs in front of the 26-day tail.
-  found.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  return found
+  return { found, unfinished: [] }
+}
+
+/**
+ * The directories a bounded scan of `projects/` can be split across.
+ *
+ * One `readdirSync` of the root - cheap even over `\\wsl$\`, because it is a
+ * single listing and no `stat` - returning each project directory plus the root
+ * itself, which is where a stray transcript would sit. The root is scanned
+ * shallowly so its files are seen without walking the projects again.
+ */
+export function usageScanUnits(projectsDir: string): UsageScanUnit[] {
+  const units: UsageScanUnit[] = [{ dir: projectsDir, depth: 0, from: 0 }]
+  let entries
+  try {
+    entries = readdirSync(projectsDir, { withFileTypes: true })
+  } catch {
+    return units
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+    units.push({ dir: join(projectsDir, entry.name), depth: 3, from: 0 })
+  }
+  return units
 }

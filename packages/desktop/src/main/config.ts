@@ -2,6 +2,8 @@ import { watch, type FSWatcher } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   addMcpServer,
+  claudeHomeFor,
+  wslDistroOf,
   computeEffectiveView,
   createConfigFile,
   deleteConfigEntry,
@@ -43,9 +45,12 @@ import {
   type RenameConfigRequest,
   type RenameConfigResult,
   type WriteConfigRequest,
-  type WriteConfigResult
+  type WriteConfigResult,
+  type WslHome
 } from '@helm/core'
+import { homedir } from 'node:os'
 import { resolveClaudeCommand } from './claude-cli'
+import { describeWslDistro, wslClaudeCommand, wslHomes } from './wsl'
 import type { Services } from './services'
 import type { ConfigExternalChange, EffectiveViewRequest, McpApproveRequest } from '../shared/ipc'
 
@@ -85,7 +90,26 @@ export interface ConfigService {
   mcpRemove: (req: { name: string; scope: McpScope; cwd: string }) => Promise<McpResult>
   mcpApprove: (req: McpApproveRequest) => WriteConfigResult
   mcpList: (cwd: string) => Promise<McpResult>
-  doctor: () => Promise<DoctorReport>
+  /**
+   * `claude doctor`, run against the CLI a session in `cwd` would use.
+   *
+   * Takes a directory for the same reason every other member here does: which
+   * Claude Code is being asked about is decided by the path, and on a machine
+   * with WSL there is more than one installation. It used to take nothing and
+   * always run this machine's, so a user whose Claude Code lives in a
+   * distribution got a health report about an installation their sessions never
+   * touch - and the panel said "run against the same CLI Helm uses", which was
+   * then untrue for exactly the scopes it mattered for.
+   */
+  doctor: (cwd: string) => Promise<DoctorReport>
+  /**
+   * Re-asks which distributions are installed and where their homes are.
+   *
+   * Called after a launch that found a distro Helm had no home for, and
+   * available to a user who has just installed one and does not want to restart
+   * Helm to see its configuration.
+   */
+  refreshWslHomes: () => Promise<readonly WslHome[]>
   stop: () => void
 }
 
@@ -110,11 +134,92 @@ function claudeCommand(): ClaudeCommand {
   return { file: command.file, prefixArgs: command.prefixArgs }
 }
 
+
 export function createConfigService({
   services,
   onExternalChange,
   userHome
 }: ConfigServiceDeps): ConfigService {
+  /**
+   * The distros' `~/.claude` directories, held because `scopes()` is
+   * synchronous and finding them is not: it is a `wsl.exe` per distribution,
+   * ~200ms each cold, and the switcher is opened from a window that has already
+   * painted. So the list is fetched once at startup and again on demand, and
+   * until the first fetch lands the switcher shows exactly what it showed
+   * before any of this existed.
+   *
+   * Not fetched at all under `--config-check`, which browses a fixture tree as
+   * the user scope: a check that reached into the developer's real
+   * distributions would be reading configuration it was never pointed at.
+   */
+  let distroHomes: readonly WslHome[] = []
+
+  async function refreshWslHomes(): Promise<readonly WslHome[]> {
+    if (userHome !== undefined) return []
+    try {
+      distroHomes = await wslHomes()
+    } catch (err) {
+      // No WSL on this machine is the ordinary answer, not a failure.
+      console.warn(`WSL homes could not be read: ${String(err)}`)
+      distroHomes = []
+    }
+    return distroHomes
+  }
+
+  void refreshWslHomes()
+
+  /**
+   * The `claude` that owns a directory's configuration.
+   *
+   * Not always this machine's, and the four `claude mcp` calls below are the
+   * place that mattered: every one of them **writes**. A project inside a
+   * distribution has its servers registered by that distribution's CLI, into
+   * that distribution's `~/.claude.json` - and running the Windows one against
+   * it put the entry in the wrong file, for a session that would never read it,
+   * while the console re-read the wrong file afterwards and showed the user a
+   * change that had not happened where they were looking.
+   *
+   * Reading and editing the tree never needed this: those are `readFileSync`
+   * and `writeFileSync` over `\\wsl$\...`, which work. Only the subprocess did.
+   *
+   * Throws for a distro with no `claude` in it rather than falling back to this
+   * machine's, which is the posture the launcher takes for the same reason: a
+   * fallback here would quietly write to the wrong file, which is the failure
+   * this exists to fix.
+   */
+  async function claudeCommandFor(cwd: string): Promise<ClaudeCommand> {
+    const distro = claudeHomeFor(cwd, distroHomes)?.distro ?? wslDistroOf(cwd)
+    if (distro === null) return claudeCommand()
+
+    const probe = await describeWslDistro(distro, null)
+    if (probe.claudePath === null) {
+      throw new Error(probe.problem ?? `No \`claude\` inside ${distro}.`)
+    }
+    // `--cd` carries the directory the CLI must work in; `hostCwd` is where
+    // this process may actually start `wsl.exe`, which cannot be the UNC path.
+    return { ...wslClaudeCommand(distro, probe.claudePath, cwd), hostCwd: homedir() }
+  }
+
+  /**
+   * The file a scope's servers land in, which is what gets snapshotted.
+   *
+   * `mcpTargetFile` answers `~/.claude.json` for the user scope, meaning
+   * *this* machine's - correct until a distro's CLI is the one being run. The
+   * snapshot is taken before the subprocess and the diff is read after it, so
+   * naming the wrong file here would version a file nothing touched and then
+   * report no change in the one the CLI had just rewritten.
+   *
+   * `.claude.json` sits *beside* `.claude` rather than inside it, which is why
+   * this is the parent of the recorded home.
+   */
+  function mcpFileFor(scope: McpScope, cwd: string): string {
+    if (scope === 'project') return mcpTargetFile(scope, cwd)
+    const home = claudeHomeFor(cwd, distroHomes)
+    return home === null
+      ? mcpTargetFile(scope, cwd)
+      : join(dirname(home.claudeHome), '.claude.json')
+  }
+
   let watcher: FSWatcher | null = null
   let watched: string | null = null
   let debounce: NodeJS.Timeout | null = null
@@ -193,6 +298,20 @@ export function createConfigService({
     const out: ConfigScope[] = [user]
     const seen = new Set<string>([user.path.toLowerCase()])
 
+    // Each distribution's own user scope, immediately after this machine's.
+    //
+    // A session hosted in a distro reads *that* `~/.claude` and never this one:
+    // its settings, its skills, its agents, its commands. Before these were
+    // listed, the console showed a user scope that was simply not the one the
+    // session would use, which is worse than showing nothing - so they sit
+    // beside it, labelled, rather than replacing it.
+    for (const home of distroHomes) {
+      const key = home.claudeHome.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(userConfigScope(home.claudeHome, `User (${home.distro})`))
+    }
+
     const add = (path: string, kind: ConfigScope['kind'], label?: string): void => {
       const key = resolve(path).toLowerCase()
       if (seen.has(key)) return
@@ -232,6 +351,25 @@ export function createConfigService({
    * renderer that sent its own copy of the overlays could show a prediction for
    * a profile nobody has.
    */
+  /**
+   * The `~/.claude` a session in `cwd` would actually read.
+   *
+   * The user layer is not a property of Helm's machine, it is a property of
+   * where the session runs - and where the session runs follows the path (see
+   * `wslDistroOf`, which is why a distro-resident project is not a choice
+   * anybody has to remember to make). A project under `\\wsl$\Ubuntu\...`
+   * composes Ubuntu's user skills, resolves Ubuntu's `settings.json`, and
+   * receives Ubuntu's `~/.claude/CLAUDE.md`. Predicting it from this machine's
+   * home would be a prediction of a session that will not happen.
+   *
+   * A `--config-check` fixture home wins over both: it is pointed at a tree on
+   * purpose, and nothing on the real machine should change what it sees.
+   */
+  function homeFor(cwd: string): string | undefined {
+    if (userHome !== undefined) return userHome
+    return claudeHomeFor(cwd, distroHomes)?.claudeHome
+  }
+
   function effective(req: EffectiveViewRequest): EffectiveView {
     if (req.profileId !== null && req.profileId !== undefined) {
       const profile = readProfile(services.store, req.profileId)
@@ -241,7 +379,7 @@ export function createConfigService({
         overlays: profile.overlays,
         profileId: profile.id,
         profileName: profile.name,
-        userHome
+        userHome: homeFor(profile.root)
       })
     }
 
@@ -249,7 +387,7 @@ export function createConfigService({
     if (cwd === undefined || cwd === '') {
       throw new Error('An effective view needs either a profile or a working directory.')
     }
-    return computeEffectiveView({ cwd, overlays: req.overlays ?? [], userHome })
+    return computeEffectiveView({ cwd, overlays: req.overlays ?? [], userHome: homeFor(cwd) })
   }
 
   /**
@@ -288,7 +426,7 @@ export function createConfigService({
    * changes Helm delegates.
    */
   async function mcpAdd(req: McpAddRequest): Promise<McpResult> {
-    const file = mcpTargetFile(req.scope, req.cwd)
+    const file = mcpFileFor(req.scope, req.cwd)
     const before = readConfigFileContent(file)
     // `~/.claude.json` is not under any scope, so it is snapshotted against its
     // own directory rather than a project's. The key is still the file name,
@@ -296,7 +434,7 @@ export function createConfigService({
     const scopePath = req.scope === 'project' ? resolve(req.cwd) : dirname(file)
     const snapshotId = insertSnapshotFor(scopePath, file, before.exists ? before.content : '', before.exists ? before.hash : hashContent(''))
 
-    const result = await addMcpServer(claudeCommand(), req)
+    const result = await addMcpServer(await claudeCommandFor(req.cwd), req)
     const after = readConfigFileContent(file)
     if (watched !== null && watched === resolve(file)) watchedHash = after.hash
 
@@ -329,14 +467,14 @@ export function createConfigService({
     scope: McpScope
     cwd: string
   }): Promise<McpResult> {
-    const file = mcpTargetFile(req.scope, req.cwd)
+    const file = mcpFileFor(req.scope, req.cwd)
     const before = readConfigFileContent(file)
     const scopePath = req.scope === 'project' ? resolve(req.cwd) : dirname(file)
     const snapshotId = before.exists
       ? insertSnapshotFor(scopePath, file, before.content, before.hash)
       : null
 
-    const result = await removeMcpServer(claudeCommand(), req)
+    const result = await removeMcpServer(await claudeCommandFor(req.cwd), req)
     const after = readConfigFileContent(file)
     if (watched !== null && watched === resolve(file)) watchedHash = after.hash
 
@@ -507,10 +645,11 @@ export function createConfigService({
     mcpRemove,
     mcpApprove,
     mcpList: async (cwd) => {
-      const result = await listMcpServers(claudeCommand(), cwd)
+      const result = await listMcpServers(await claudeCommandFor(cwd), cwd)
       return { ...result, after: '', snapshotId: null }
     },
-    doctor: () => runDoctor(claudeCommand()),
+    doctor: async (cwd) => runDoctor(await claudeCommandFor(cwd)),
+    refreshWslHomes,
     stop: stopWatching
   }
 }

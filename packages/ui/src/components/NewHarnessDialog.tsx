@@ -20,7 +20,21 @@ export interface NewHarnessDialogProps {
   mode: 'new' | 'convert'
   /** For 'new', the folder it will be created inside; for 'convert', the folder itself. */
   dir: string
-  onChooseDir: () => void
+  /** `startIn` opens the picker there; see `distros` for the only caller of it. */
+  onChooseDir: (startIn?: string) => void
+  /**
+   * The WSL distributions on this machine, each with the folder to open the
+   * picker in - its `\\wsl$\...\home\<user>` - or empty where there are none.
+   *
+   * A row per distribution rather than one "Linux" button, because Windows'
+   * file dialog cannot be given the Linux entry Explorer has: that entry is a
+   * shell namespace extension, and the share root is not something the file
+   * APIs can even list (`readdirSync('\\\\wsl$\\')` answers ENOENT, measured
+   * 2026-09-03). What Helm *can* do is open the dialog already inside a
+   * distribution, which is where that entry was only ever a route to - and it
+   * knows every distro's home because four other readers already need it.
+   */
+  distros?: ReadonlyArray<{ distro: string; home: string }> | undefined
   /** The dialog owns the mode after it opens; this is how the owner keeps up. */
   onModeChange?: ((mode: 'new' | 'convert') => void) | undefined
   problems?: readonly string[] | undefined
@@ -77,6 +91,7 @@ export function NewHarnessDialog({
   mode: initialMode,
   dir,
   onChooseDir,
+  distros = [],
   onModeChange,
   problems = [],
   busy = false,
@@ -213,11 +228,23 @@ export function NewHarnessDialog({
             <button
               type="button"
               data-harness-choose
-              onClick={onChooseDir}
+              onClick={() => onChooseDir()}
               className="h-[30px] shrink-0 rounded-well border border-border-strong px-2.5 text-[12px] text-fg transition-colors hover:bg-hover"
             >
               Choose…
             </button>
+            {distros.map((entry) => (
+              <button
+                key={entry.distro}
+                type="button"
+                data-harness-choose-distro={entry.distro}
+                onClick={() => onChooseDir(entry.home)}
+                title={`Open the folder picker in ${entry.home}`}
+                className="h-[30px] shrink-0 rounded-well border border-border-strong px-2.5 text-[12px] text-fg transition-colors hover:bg-hover"
+              >
+                {entry.distro}…
+              </button>
+            ))}
           </span>
           <span className="mt-[5px] block text-[10px] text-fg-subtle">
             {mode === 'new'

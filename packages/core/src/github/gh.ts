@@ -48,6 +48,24 @@ export interface GhCommand {
   prefixArgs: string[]
   /** The gh entry point itself, for diagnostics. */
   resolved: string
+  /**
+   * Where the *host* process is started, when that is not the directory the
+   * command is about.
+   *
+   * Only `checkoutPull` is about a directory at all - everything else here
+   * names its repository with `--repo` - and for a checkout inside a WSL
+   * distribution the two come apart: the program is `wsl.exe`, the repository
+   * is carried on its argv as `--cd`, and the working directory this process
+   * may spawn with is neither. A `\\wsl$\...` cwd cannot be used: `execFile`
+   * does not even fail honestly there, it spawns with the directory silently
+   * defaulted (measured 2026-09-03 - `cmd.exe` reports "UNC paths are not
+   * supported. Defaulting to Windows directory."), so the checkout would land
+   * somewhere nobody chose.
+   *
+   * Unset by every ordinary caller, which leaves the Windows path unchanged.
+   * The same field, for the same reason, as `ClaudeCommand.hostCwd`.
+   */
+  hostCwd?: string | undefined
 }
 
 export interface GhRun {
@@ -93,7 +111,13 @@ export async function runGh(
       command.file,
       [...command.prefixArgs, ...args],
       {
-        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        // `hostCwd` wins: a routed command carries the real directory on its
+        // own argv, and the one it would be spawned with is unusable.
+        ...(command.hostCwd !== undefined
+          ? { cwd: command.hostCwd }
+          : options.cwd !== undefined
+            ? { cwd: options.cwd }
+            : {}),
         timeout: options.timeoutMs ?? TIMEOUT_MS,
         windowsHide: true,
         maxBuffer: options.maxBuffer ?? MAX_BUFFER,

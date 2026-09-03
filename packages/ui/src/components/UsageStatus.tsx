@@ -369,7 +369,25 @@ function tooltip(
     lines.push('Waiting for Claude Code to report its usage figures.')
   }
 
-  if (snapshot !== null && snapshot.file !== '') lines.push(snapshot.file)
+  if (snapshot !== null && snapshot.file !== '') {
+    lines.push(snapshot.file)
+    /*
+     * Which install this reading came from, when it was not this machine's.
+     *
+     * Every Claude Code install caches the same account's utilisation in its
+     * own `~/.claude.json`, and Helm shows whichever was fetched most recently
+     * - so on a machine that also has WSL, the figures above can legitimately
+     * come from a distribution. The path on the line before already says so to
+     * anyone who reads `\\wsl$\Ubuntu\...` fluently; this says it in words,
+     * because "why is my usage coming from somewhere else" is a question the
+     * file path answers only if you already know the answer.
+     *
+     * Null for this machine, so the ordinary case gains no line.
+     */
+    if (snapshot.origin !== null) {
+      lines.push(`Read from the Claude Code in ${snapshot.origin}, which had the newer reading.`)
+    }
+  }
   // Still the quick accessor it always was; it just is not the only way in any
   // more, and a control that is also a setting should say where the setting is.
   lines.push('Click to change what this shows, or set it in Settings > Appearance.')

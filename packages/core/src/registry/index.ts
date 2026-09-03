@@ -2,6 +2,7 @@ export {
   joinSessionRegistry,
   newClaudeSessionId,
   parseRegistryRecord,
+  readForeignSessionRegistry,
   readSessionRegistry,
   sessionRegistryDir,
   type RegistryJoin,

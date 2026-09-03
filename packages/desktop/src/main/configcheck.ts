@@ -19,7 +19,10 @@ import {
   readConfigFileContent,
   type Profile
 } from '@helm/core'
-import { screenshot, sleep, waitFor } from './bridge'
+import { screenshot, sleep, stripAnsi, waitFor } from './bridge'
+import { runScan, updateSettings } from './services'
+import { emit } from './ipc'
+import { profiles } from './profiles'
 import type { Check } from './fidelity'
 import type { Collector, CheckContext } from './sessionscheck'
 import { ask, waitForPrompt } from './profilescheck'
@@ -56,7 +59,8 @@ const TOKENS = {
   alphaThink: 'HELMM5ALPHATHINK',
   betaThink: 'HELMM5BETATHINK',
   alphaOnly: 'HELMM5ALPHAONLY',
-  mcp: 'HELMM5MCPTOKEN'
+  mcp: 'HELMM5MCPTOKEN',
+  harnessSkill: 'HELMM5HARNESSSKILL'
 }
 
 const MCP_SERVER = 'helm-config-probe'
@@ -408,6 +412,28 @@ interface Fixtures {
   alpha: string
   beta: string
   mcpServer: string
+  /**
+   * A scan root holding one harness of this driver's own, and the harness in
+   * it.
+   *
+   * Both exist because the harness scope used to be **borrowed**: whatever
+   * `services.lastScan` happened to hold, with the user's own `~/.claude` as a
+   * silent fallback. Two things were wrong with that, and on 2026-09-03 they
+   * both bit at once. The scan is asynchronous and took 58 seconds on this
+   * machine, so CFG-1 and CFG-2 ran before it landed and fell back; and the
+   * fallback is a directory with no skill in it, because on a machine whose
+   * Claude Code lives in WSL the Windows `~/.claude` legitimately holds nothing
+   * - 0 skills against Ubuntu's 8. So both failed for reasons that had nothing
+   * to do with the config console, which is the failure mode CLAUDE.md names:
+   * "a check that fails for a reason unrelated to what it measures gets waved
+   * past, and then so does the day it fails for a real one."
+   *
+   * A real harness rather than a directory smuggled in through a profile: it
+   * carries a `harness.yaml`, so discovery classifies it `harness` the way it
+   * classifies the user's, and the scope it produces is the one under test.
+   */
+  harnessRoot: string
+  harness: string
 }
 
 function writeSkill(repo: string, name: string, token: string): void {
@@ -554,7 +580,23 @@ createInterface({ input: process.stdin }).on('line', (line) => {
 `
   )
 
-  return { root, workspace, alpha, beta, mcpServer }
+  /*
+   * The harness scope, built rather than borrowed. See `Fixtures.harnessRoot`.
+   *
+   * A space in the directory name, like every other fixture path in this repo:
+   * Windows-first, and a scope path reaches `claude`'s argv.
+   */
+  const harnessRoot = join(root, 'harness root')
+  const harness = join(harnessRoot, 'probe harness')
+  mkdirSync(harness, { recursive: true })
+  writeFileSync(join(harness, 'harness.yaml'), 'name: probe harness\n')
+  // Two files, because CFG-15's claim is that a file beside a `SKILL.md` is on
+  // the skill's row and has no row of its own - and a harness with a bare
+  // skill could not tell that apart from a harness with nothing in it.
+  writeSkill(harness, 'harness-skill', TOKENS.harnessSkill)
+  writeFileSync(join(harness, 'CLAUDE.md'), '# Probe harness instructions\n')
+
+  return { root, workspace, alpha, beta, mcpServer, harnessRoot, harness }
 }
 
 /**
@@ -612,6 +654,59 @@ export async function runConfigChecks(
   const fixtures = buildFixtures(dataDir)
   const userHome = claudeHome()
 
+  /*
+   * The fixture harness, discovered before any group asks for a harness scope.
+   *
+   * Added as a scan root and scanned **here**, synchronously awaited, rather
+   * than relying on the start-up scan: that one is asynchronous and took 58
+   * seconds on the machine where this was written, so the groups below used to
+   * read a `services.lastScan` that was still null. Whatever the app's own scan
+   * then finds is left in place beside it - this adds a root, it does not
+   * replace the user's.
+   *
+   * `includeGit: false` because none of these fixtures is a repository and the
+   * git pass is the expensive half of a scan.
+   */
+  /*
+   * The app's own start-up scan is waited for **first**, and that order is the
+   * whole of this. `lastScan` is null until it lands, it reads its roots when
+   * it begins, and it took 58 seconds on this machine - so a scan of this
+   * driver's own done before it finishes is a scan the start-up one then
+   * *overwrites*, roots and all. That is a real run: the fixture harness was
+   * discovered, replaced 40 seconds later by a listing that had never heard of
+   * it, and the browse group threw with "the scope switcher has no option for
+   * ...\probe harness".
+   */
+  await waitFor(() => services.lastScan !== null, 180_000)
+
+  const rootsBefore = services.settings.scanRoots
+  if (!rootsBefore.some((root) => root.toLowerCase() === fixtures.harnessRoot.toLowerCase())) {
+    updateSettings(services, { scanRoots: [...rootsBefore, fixtures.harnessRoot] })
+  }
+  await runScan(services, { includeGit: false })
+
+  /**
+   * The harness scope the groups below use, found the way they find it: out of
+   * the scan, matched to the fixture by path.
+   *
+   * Read back out of the scan rather than assumed from the path, so what is
+   * under test is "a harness Helm discovered" and not "a directory this driver
+   * made". Its absence is a *failure* wherever it is used - never a quiet
+   * fallback to the user's home, which is what used to happen.
+   */
+  const findFixtureHarness = (): { path: string } | undefined =>
+    (services.lastScan?.projects ?? []).find(
+      (project) =>
+        project.kind === 'harness' &&
+        project.path.toLowerCase() === fixtures.harness.toLowerCase()
+    )
+  if (findFixtureHarness() === undefined) {
+    console.warn(
+      `config-check: the scan did not classify ${fixtures.harness} as a harness. ` +
+        'The harness-scope claims below will fail rather than fall back.'
+    )
+  }
+
   /**
    * The user's real `~/.claude/settings.json`, copied before anything touches
    * it. The restore at the end goes through Helm's snapshot history - which is
@@ -646,8 +741,26 @@ export async function runConfigChecks(
     agent: null,
     mcp: [],
     openingPrompt: null,
-    pinnedOrder: null
+    pinnedOrder: null,
+    target: null
   })
+
+  /*
+   * The window is told the profile exists.
+   *
+   * `createProfile` above is a store write, and the renderer's profile list
+   * comes from `profiles:changed` - which only the `profile:*` channels emit.
+   * So without this the pane never hears about it: the effective view's profile
+   * picker has no option to select, `setValue` silently leaves it on "A
+   * directory, with no overlays", and CFG-8 compares a pane resolving the
+   * workspace *alone* against a service resolving it with two overlays. That is
+   * what it did - one skill painted against four - and the reason it passed for
+   * so long is worse than the bug: a profile of the same name left behind by an
+   * earlier run was already in the seeded database at start-up, so the picker
+   * had an option and nobody noticed the emit was missing.
+   */
+  emit(win, 'profiles:changed', profiles(services))
+  await sleep(300)
 
   const openedConsole = await showConsole(win)
   // The scope list is rebuilt from `profiles:changed`, which the store write
@@ -775,7 +888,11 @@ async function browseChecks(
   const { win, services } = ctx
   const checks: Check[] = []
 
-  const harness = (services.lastScan?.projects ?? []).find((p) => p.kind === 'harness')
+  // The driver's own harness, matched by path - never simply "the first harness the
+  // developer's scan happened to find"; see `Fixtures.harnessRoot`.
+  const harness = (services.lastScan?.projects ?? []).find(
+    (p) => p.kind === 'harness' && p.path.toLowerCase() === fixtures.harness.toLowerCase()
+  )
   const scopes: Array<{ kind: string; path: string; isUser: boolean }> = [
     { kind: 'user', path: userHome, isUser: true },
     ...(harness ? [{ kind: 'harness', path: harness.path, isUser: false }] : []),
@@ -827,8 +944,13 @@ async function browseChecks(
     })
   }
 
-  // And through the window, for the scope the switcher can actually reach.
-  const harnessPath = harness?.path ?? userHome
+  // And through the window. The fixture harness whether or not the scan
+  // classified it: `selectScope` throws when the switcher has no option for a
+  // path, which is the loud failure this used to swap for the user's home - a
+  // directory that holds no skill on a machine whose Claude Code is in WSL, so
+  // the fallback failed the "some row is a skill" claim while the console was
+  // working perfectly.
+  const harnessPath = harness?.path ?? fixtures.harness
   await selectScope(win, harnessPath)
   const painted = await listedFiles(win)
   const paintedTruth = ctx.config.tree(harnessPath)
@@ -1204,7 +1326,11 @@ async function editChecks(
   userHome: string
 ): Promise<Check[]> {
   const { win, services } = ctx
-  const harness = (services.lastScan?.projects ?? []).find((p) => p.kind === 'harness')
+  // The driver's own harness, matched by path - never simply "the first harness the
+  // developer's scan happened to find"; see `Fixtures.harnessRoot`.
+  const harness = (services.lastScan?.projects ?? []).find(
+    (p) => p.kind === 'harness' && p.path.toLowerCase() === fixtures.harness.toLowerCase()
+  )
   const outcomes: EditOutcome[] = []
 
   /**
@@ -1787,16 +1913,46 @@ async function effectiveChecks(
     })
     .map(([key]) => key)
 
+  // The scope this group is about, chosen rather than inherited.
+  //
+  // The effective view resolves from a *working directory*, and the console
+  // takes that from the scope on screen - so this used to depend on whichever
+  // scope the group before it happened to leave selected. It passed for as long
+  // as that was the workspace, and stopped the moment the browse group started
+  // ending on a harness of its own: the pane painted that harness's one skill
+  // and the probe compared it against the workspace's four.
+  await selectScope(win, fixtures.workspace)
   await selectView(win, 'effective')
   await setValue(win, 'select[data-effective-profile]', String(profile.id))
-  await sleep(1200)
-  const painted = await js<{ invocations: string[]; shared: string[] }>(
-    win,
-    `(() => ({
+
+  const readPainted = (): Promise<{ invocations: string[]; shared: string[] }> =>
+    js<{ invocations: string[]; shared: string[] }>(
+      win,
+      `(() => ({
       invocations: [...document.querySelectorAll('[data-invocation]')].map((el) => el.dataset.invocation),
       shared: [...document.querySelectorAll('[data-shared-name]')].map((el) => el.dataset.sharedName)
     }))()`
-  )
+    )
+
+  /*
+   * Wait for the resolved-names list to settle rather than sleeping at it.
+   *
+   * The fixed 1.2s was enough until this pane had more to resolve than it used
+   * to, and then it was not: the probe read a list that had painted one of its
+   * four rows and reported the pane as disagreeing with a service that had
+   * answered correctly.
+   *
+   * The loop cannot invent the right answer - it only stops early. Whatever the
+   * pane is holding when the deadline passes is what gets asserted, so a pane
+   * that settles on three rows still fails, and one that paints nothing fails
+   * with an empty list in the detail rather than with a timeout nobody can read.
+   */
+  let painted = await readPainted()
+  const settleBy = Date.now() + 20_000
+  while (painted.invocations.length !== view.skills.length && Date.now() < settleBy) {
+    await sleep(300)
+    painted = await readPainted()
+  }
   const viewShot = await screenshot(win, shotDir, 'config-effective.png')
 
   const sharedThink = view.sharedNames.find((entry) => entry.name === 'think')
@@ -1838,6 +1994,20 @@ async function effectiveChecks(
   const id = launched.session.id
 
   const ready = await waitForPrompt(ctx, collector, id, 180_000)
+
+  /*
+   * What the terminal actually had on it, recorded whether or not the wait
+   * succeeded.
+   *
+   * Without this the failure reads "the session never reached a prompt" and
+   * says nothing about *why* - which is where this check sat for two runs.
+   * A gate nobody answered, a CLI that printed an error and exited, and a
+   * machine that is simply slow are three different problems with one symptom,
+   * and the tail tells them apart. `profilescheck` keeps a local helper of the
+   * same shape for the same reason; this is that argument applied to the check
+   * that had the failure.
+   */
+  const terminalTail = stripAnsi(collector.output(id)).replace(/\s+/g, ' ').trim().slice(-1200)
 
   const tokens = {
     alphaThink: skillToken(join(fixtures.alpha, '.claude', 'skills', 'think', 'SKILL.md')),
@@ -1914,6 +2084,9 @@ async function effectiveChecks(
       session: { id, cwd: launched.session.cwd, argv: launched.session.argv },
       overlaysComposed: launched.overlays,
       reachedPrompt: ready,
+      // The last of what was on the terminal. The first thing to read when
+      // `reachedPrompt` is false.
+      terminalTail,
       skills: {
         asked: ['alpha:think', 'beta:think', 'alpha:alpha-only'],
         expected: { S1: tokens.alphaThink, S2: tokens.betaThink, S3: tokens.alphaOnly },

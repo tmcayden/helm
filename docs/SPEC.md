@@ -1045,6 +1045,280 @@ element.
 
 ---
 
+### 4.8 WSL targets
+
+A profile chooses **where its sessions run**: this machine, or inside a WSL
+distribution. A WSL target hosts the distro's own `claude` against the distro's
+own `~/.claude`, and Helm stays a Windows process throughout - `wsl.exe` is the
+program the pty opens and the CLI sits behind `--`.
+
+The motivating machine is the ordinary one for this: the toolchain lives inside
+Ubuntu, and a Windows-only Helm can only ever launch the Windows CLI.
+
+> [!note] Measured 2026-09-02, before any of it was written
+> Four questions decided the shape, and each answer removed work rather than
+> adding it.
+>
+> - **A Windows directory junction resolves inside the distro.** It surfaces as
+>   a symlink whose target is *already* translated - `skills ->
+>   /mnt/c/.../.claude/skills` - and reads through it work. So the overlay shim
+>   of section 2 crosses the boundary unchanged for a project on a Windows
+>   drive, and `launch/overlay.ts` needed no WSL branch for that direction.
+>
+>   **The other direction does not, and it fails silently** - measured later the
+>   same day, after the first sentence had been read as "overlays just work". A
+>   junction whose *target* is a UNC path, which is what every project inside a
+>   distribution has, is **created successfully** and then resolves to nothing:
+>   `existsSync`, `lstat`, `realpath` and `readdir` all answer ENOENT.
+>   `symlinkSync` does not throw, so the copy fallback that existed for
+>   filesystems without reparse points never fired, and an overlay from a
+>   distro-resident repo produced a `--plugin-dir` pointing at a dead link. A
+>   session composed nothing and said nothing - the exact outcome section 2's
+>   sweep rules exist to prevent, arriving through the one door nobody was
+>   watching. `link` now **verifies** the junction resolves and falls back to a
+>   copy, and the check is on the result rather than on the shape of the target,
+>   so it also covers whatever else turns out to behave this way.
+> - **Killing the Windows-side `wsl.exe` reaps the Linux process.** So "the main
+>   process owns process lifetime" holds through the relay and `treeKill` needed
+>   no second path.
+> - **`wsl.exe --cd` accepts a Windows path** and translates it itself. That is
+>   why a plan's `cwd` stays Windows-spelled - it is what the pty is opened with
+>   - while its **argv** is translated, since those are the paths the CLI inside
+>   the distro opens.
+> - **The loopback endpoint is not reachable from a distro.** Measured on
+>   default NAT networking with no `.wslconfig`: `127.0.0.1:<port>` fails,
+>   because loopback only mirrors under `networkingMode=mirrored`, and the
+>   gateway address fails too, because the server binds `127.0.0.1` and that
+>   rule is not being loosened.
+>
+> The fourth is the only one with a user-visible consequence, and the response
+> is **detect and name the fix** rather than an amendment. A WSL session is
+> probed - `/dev/tcp` from inside the distro, which needs no `curl` a minimal
+> image might not have - and where it cannot reach the endpoint it launches
+> with **no `--mcp-config` at all** and a sentence naming
+> `networkingMode=mirrored`. Nothing is minted for a session that could not use
+> it: a token without a reachable listener is a live credential nothing can
+> spend.
+>
+> The fix is now **offered as well as named**, in the settings pane's WSL group:
+> Helm sets `networkingMode` under `[wsl2]` in `%USERPROFILE%\.wslconfig`,
+> preserving every other key, section and comment in it, and copying the file to
+> a timestamped `.helm.bak` beside itself before it writes - the config
+> console's snapshot rule (section 7) applied to the one file Helm touches
+> outside a `.claude` tree. Three things it deliberately is not. It is not a
+> profile field, because `networkingMode` is machine-wide and a per-profile
+> control would claim a scope it does not have. It is not an install step, for
+> the reason section 7 gives about every other file Helm does not own. And it
+> **never runs `wsl --shutdown`** as part of the write: that ends every WSL
+> process on the machine, so it is a separate action behind a confirmation that
+> says so. A file it cannot parse with confidence - a line it cannot read, two
+> `[wsl2]` sections, two `networkingMode` keys - is reported and left alone.
+> What the file says and whether a distro can reach the endpoint stay two
+> facts on the pane, because `mirrored` written and WSL not yet restarted is
+> the state a user is most often in.
+>
+> **The network posture in section 5 is unchanged.** The listener is still one
+> socket on `127.0.0.1`, still two named servers, and nothing new is contacted.
+> What a distro can or cannot reach is a fact about the machine's networking
+> mode, not a change to what Helm binds.
+
+Three things follow, and they are the whole of the mechanism:
+
+- **`target` is on the profile**, as `windows` or `wsl:<distro>`, in one column
+  and one YAML key through one codec. Null means Windows, which is what every
+  profile written before targets existed means - so nothing migrated and nothing
+  had to.
+- **A resident path decides the target, and it is not a preference.** A project
+  under `\\wsl$\<distro>\...` cannot run on Windows at all: `CreateProcess`
+  refuses a UNC working directory (ENOENT, measured), so the launcher derives
+  the target from the path and overrides whatever the profile said. The editor
+  asks the same function and shows the answer with the control disabled, rather
+  than offering a choice the launch would discard - and the chosen value is kept
+  underneath, so editing the root back to a Windows path restores it. A root on
+  a Windows drive stays a free choice, because running a `C:\` project inside a
+  distro genuinely works.
+- **Translation happens once, in `prepareLaunch`, after the disk work.** The
+  shims, the composed memory file and the `--mcp-config` document are written by
+  a Windows process in Windows spelling; only the argv naming them is
+  translated. A path with no spelling inside the distro - a UNC path into a
+  *different* distro, say - is **dropped with a warning** rather than passed
+  through, because `--add-dir` naming a directory that is not there is a session
+  silently granted nothing.
+- **A distro's CLI is discovered inside it**, at its own `$HOME/.local/bin` or
+  on a login shell's PATH, with the same warn-do-not-block posture section 7
+  pins for the Windows one. A WSL target with no `claude` in the distro is the
+  one place this is stricter: it names the distro and refuses, rather than
+  opening a pty that closes.
+
+#### The second `~/.claude`
+
+The paragraph that used to sit here said this was not done, and it now is. A
+distribution keeps a `.claude` of its own - its own `settings.json`, skills,
+agents and commands, its own `history.jsonl`, its own `projects/` transcripts,
+its own `sessions/` registry - and a session hosted there uses that one and
+never this machine's. Until Helm read it, a WSL session launched and hosted
+correctly and then vanished: absent from history, absent from the spend
+estimate, a tab whose state dot never lit.
+
+> [!note] Measured 2026-09-02, against a live distribution
+> - **`\\wsl$\<distro>\home\me\.claude` is an ordinary directory.** `readdir`,
+>   `stat`, read and write all work, and writes land with the right ownership.
+>   So every reader in `discovery/`, `usage/`, `config/` and `registry/` works
+>   over one **unchanged** - what they needed was a second path, not a WSL
+>   implementation, and `wslClaudeHome` is the whole of the new mechanism. The
+>   config console reads 94 files, 8 skills, 21 commands and 16 agents out of
+>   one in 368ms.
+> - **The effective view was simply wrong for a distro project before this.**
+>   Same working directory, this machine's user layer: 0 skills, 0 commands, 0
+>   agents. The distro's: 8, 21, 16.
+> - **The history is where the work actually is.** 24 prompts in this machine's
+>   `history.jsonl`, 3,539 in the distro's. Indexing both: 550 sessions, 3,563
+>   prompts, 55 projects, 90ms.
+> - **A distro records Linux-spelled working directories**, because that is what
+>   its CLI saw. `statSync` on Windows resolves a leading `/` against the
+>   current drive root, so `/home/me/harness` reads as absent - and
+>   `projectExists` is what decides whether a conversation can be resumed at
+>   all. Before translating: **7** resumable of 550. After: **190**.
+
+Four rules follow.
+
+- **The homes are found once and handed to every reader together.** The history
+  index, the usage index and the session-registry join widen in one call, off
+  the startup path - a `wsl.exe` per distribution is ~200ms cold and the window
+  must not wait on it. They widen *together* because a session in the history
+  whose tokens are missing from the spend is worse than either omission alone.
+- **One index over many files, not one index per file.** `indexHistory` takes
+  every source in a single pass, because two of its steps are whole-table
+  operations and running them per file would have each pass undo the last. Rows
+  carry no source column, so a file that shrank rebuilds everything - the rare
+  case paying for the common one, rather than a column that would have to be
+  right about rows written before it existed.
+- **Resume reads the target off the transcript's path**, which is the evidence
+  the project path is not: a session run *inside* a distro against `/mnt/c/work`
+  records a `C:\work`-shaped directory and belongs to the distro all the same.
+  The recorded directory is then translated once, at that same point, so a
+  resumed distro session is indistinguishable from a launched one everywhere
+  below.
+- **A foreign registry is joined, never listed.** The `pid` in a distro's
+  session record belongs to that distro's kernel; probing it against this
+  machine's process table either misses a running session or matches an
+  unrelated Windows process and calls a finished conversation live. So liveness
+  comes from Helm instead - only records that join to a session Helm is hosting
+  are used, and a hosted session is live because Helm holds the relay's pty.
+  Asking the distro on the registry's 750ms timer would be a `wsl.exe` per pass,
+  which is the budget rule of section 8 inverted.
+
+#### The rest of the surface
+
+Six things were asymmetric for the same underlying reason - a Windows process
+assuming its own machine is the only one - and none of them was a missing
+feature so much as a wrong answer.
+
+- **A repository-local tool is reached one way, decided in one place.** The
+  launcher's git state routed into a distribution; the pull-request sweep did
+  not, and the result was a distro-resident repository whose branch and dirty
+  count the sidebar showed while the PR pane reported it as having nothing.
+  Measured 2026-09-03: from Windows with a `\\wsl$\...` working directory,
+  `git remote get-url origin` exits 128 with `safe.directory 'undefined' not
+  absolute`, and `gh repo view` fails the same way one level up. `readOrigin`
+  returned null - which is also its answer for a folder that is not a
+  repository, so the surface could not even say what was wrong. `repoCommand`
+  in `discovery/git.ts` is now that single decision, and after it 11 of 16
+  remotes read on the machine this was written against where 0 had before. Only
+  `gh pr checkout` needs the routing beyond that; everything else names its
+  repository with `--repo` and is cwd-independent, so it stays on this
+  machine's gh and this machine's authentication. A checkout inside a
+  distribution needs that distribution's own gh, signed in, and says so when it
+  has neither.
+
+- **A subprocess must be the distro's CLI.** Reading and editing a `.claude`
+  tree over `\\wsl$\...` is `readFileSync` and `writeFileSync` and always
+  worked; the four `claude mcp` calls in the config console did not, and all
+  four **write**. Run from Windows against a distro project they registered the
+  server in this machine's `~/.claude.json`, for a session that would never read
+  it, and the console then re-read the wrong file and showed no change. The
+  command is now chosen from the directory, and the snapshot follows it.
+  `ClaudeCommand.hostCwd` exists because `CreateProcess` cannot be given the
+  UNC path the command is *about*.
+- **A sign-in inside WSL is a sign-in.** The setup pane asked only this
+  machine's `~/.claude`, so somebody whose entire install lives in Ubuntu - the
+  ordinary shape once the toolchain does - was told they were not signed in,
+  beside a launcher that would have run their sessions. The distros are asked
+  second, so a Windows answer never changes, and only ever turn a "no" into a
+  "yes" that names the distribution. Still three existence questions and no
+  credential opened.
+- **A distro's home is offered as a scan root.** `~/harness` inside a
+  distribution had to be pasted in by hand. `suggestRoots` now takes the homes
+  from the host - core still neither spawns nor knows about WSL - and offers
+  their `harness` and `.harness` directories on the same footing as this
+  machine's. Never the home itself: that is the existing "never fall back to the
+  home directory" rule, and it is worse over a UNC share.
+- **"Holding nothing" is not an answer this pass may give about a WSL session.**
+  The process walk enumerates Windows processes, and a distro-hosted session's
+  pty is `wsl.exe` - so the walk does not fail, it succeeds and finds no
+  children, which is the reassuring wrong answer section 8's rule forbids. Such
+  a session now reads as *could not look*. Asking the distro instead would be a
+  `wsl.exe` per pass on a timer, which inverts the budget that rule sits on.
+
+- **The usage limits are ranked, not reconciled.** Every install caches the
+  *same* account's `cachedUsageUtilization` in its own `~/.claude.json`, so the
+  copies differ only in how recently that install made a request. This section
+  previously said the limits came from this machine's file alone "because
+  choosing between two would be a rule with nothing behind it" - which was
+  wrong, and `fetchedAtMs` is the rule that was behind it. **The freshest fetch
+  wins**, and the reading can name the install it came from.
+
+  Ranked by fetch time only, never by which copy would paint a number: a stale
+  or rolled-over freshest reading is the honest state of the account, and
+  `usageView` remains the sole judge of what may be shown. A tie keeps this
+  machine, which is passed first, so it resolves to the reading that needs no
+  explanatory sentence. Nothing is ever blended or averaged - that would be a
+  reading nobody took - and all-absent degrades to the first candidate's own
+  reason. Consolidating the files was rejected outright: `~/.claude.json` holds
+  onboarding state, a user id, per-project entries and MCP servers, so linking
+  two installs' copies would make every unrelated key shared, and it would mean
+  Helm writing into a tree it only reads.
+
+  This is also what makes the percentage and the dollar figure describe the same
+  thing, since the spend index already merges transcripts across homes.
+
+**What this still does not do.** A `claude` somebody starts in a distro's own
+terminal is not in the machine-wide sessions listing, for the liveness reason
+above - the listing is about processes this machine can be asked about. Fixing
+it means a batched liveness probe, one `wsl.exe` per distribution per pass on
+the 4s watch-gated timer rather than the registry's 750ms one, and that is a
+design rather than a patch. `runDoctor` still runs the Windows CLI, and is the
+one thing here with no path to derive an answer from: `claude doctor` is about
+an *installation*, so making it right means the health panel gaining an explicit
+selector rather than a main-process change. There is **no `wsl-check`**: no
+single real-window driver re-runs the measurements in this section. What does
+cover parts of it, since 2026-09-03, is `settings-check --only=wsl` (the
+`.wslconfig` control end to end, against a fixture profile) and
+`usage-check --only=homes` (the freshest-reading rule across two homes); the
+rest of the section is still held up by unit tests and by measurements taken by
+hand.
+
+**Two bugs the first run of those found**, both of the shape that only a
+real-window driver finds:
+
+- **`CLAUDE_CONFIG_DIR` did not stop the fan-out to distro homes.** The gate in
+  `index.ts` was on `--claude-home` only, and `transcript-check` points itself
+  with the variable - so a driver isolated from everything else pulled 123 real
+  conversations out of the developer's Ubuntu into a bounded-storage probe, and
+  T-4 failed for a reason unrelated to eviction. The rule now lives inside
+  `wslHomes()`, so all four callers obey it: a process told which tree to read
+  does not also read the ones inside every distribution.
+- **The WSL group's state was mounted at app start, not with the pane.** Two
+  comments in the tree disagreed about this and the code implemented the wrong
+  one, which cost a `wsl.exe --list` on every launch for every user - and, worse
+  for anyone using the control, meant `.wslconfig` was read **once per window**:
+  nothing watches that file, so a file edited by hand went on being misreported
+  until Helm restarted. `SettingsWithWsl` mounts the hook with the pane, so the
+  read happens on every open. S-23 caught it by planting a fixture and asking
+  what path was on screen.
+
+---
+
 ## 5. Architecture
 
 ```

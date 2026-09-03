@@ -6,12 +6,14 @@ import {
   evictToCeiling,
   forgetArchiveFiles,
   indexedArchiveFiles,
+  projectsDirIn,
   readArchiveStats,
   readArchiveTail,
   scanTranscripts,
   type ArchiveStats,
   type Store,
-  type TranscriptFile
+  type TranscriptFile,
+  type WslHome
 } from '@helm/core'
 
 /**
@@ -50,6 +52,36 @@ import {
  * session appending 4 KB - it is two 4 KB reads instead of one. The complexity
  * of splitting one read between two parsers at two different offsets buys that
  * 4 KB and is not worth it.
+ *
+ * ## Every home, and the sweep is where that was missing
+ *
+ * A session hosted in a WSL distribution writes its transcript into *that*
+ * distro's `~/.claude/projects` and nowhere else, so an archive that knew only
+ * this machine's directory would lose exactly the conversations the distro's
+ * CLI had. The incremental half was already right - the walk it consumes is the
+ * session index's, and that one widened to every home when `wslHomes` landed -
+ * but `sweep()` did its own walk of a single directory it was constructed with,
+ * so the *backlog* stopped at this machine's tree. Measured 2026-09-03: 389
+ * surviving transcripts across both homes, ~100 project directories in the
+ * distro alone, all of them outside the only directory `sweep()` could see.
+ *
+ * The homes therefore arrive the way they arrive everywhere else - `useHomes`,
+ * after the probe, off the startup path - and are read back through a function
+ * on every sweep, which is `createUsageIndex`'s `projectsDirs` precedent and
+ * exists for the same reason: the probe has not finished when this service is
+ * built, and a distro installed while Helm is open joins at the next pass with
+ * nothing to tell.
+ *
+ * **This does not multiply the per-pass read**, which is the budget rule that
+ * would otherwise forbid it. `CHUNK_BYTES` is spent by the pass and not by the
+ * directory - the 16 MB synchronous chunks the process budget is written around
+ * are the same 16 MB whether they come out of one home or three, and a pass
+ * that runs out of budget schedules the next tick exactly as it did before.
+ * What does multiply is the walk, `readdir` per project directory plus a
+ * `statSync` per transcript, and that is affordable for a measured reason: the
+ * session index already does that identical walk over every home on every one
+ * of its passes (90 ms for both homes, SPEC 4.8), and `sweep` is not on a timer
+ * at all - nothing in the app calls it, only `pnpm transcript-check` does.
  *
  * ## Everything here is read-only with respect to `~/.claude`
  *
@@ -143,7 +175,13 @@ export interface ArchivePass {
 
 export interface ArchiveServiceDeps {
   store: Store
-  /** `~/.claude/projects`, or wherever `CLAUDE_CONFIG_DIR` puts it. */
+  /**
+   * This machine's `~/.claude/projects`, or wherever `CLAUDE_CONFIG_DIR` puts it.
+   *
+   * The head of the list `sweep()` walks and the only member of it until
+   * `useHomes` widens it. It never changes, so a check pointed at a fixture
+   * tree stays pointed there.
+   */
   projectsDir: string
   /** Read through a function: the ceiling can change while the app is running. */
   maxBytes: () => number
@@ -157,13 +195,36 @@ export interface ArchiveService {
    * this with the map it has just built.
    */
   consume: (transcripts: Map<string, TranscriptFile>) => ArchivePass
-  /** One pass over a walk of this service's own. The start-up sweep. */
+  /**
+   * One pass over a walk of this service's own, across every home.
+   *
+   * The one path here that does not ride the session index's walk, which is why
+   * it is the half that had to be widened by hand - see the header.
+   */
   sweep: () => ArchivePass
+  /**
+   * Adds the WSL distributions' `projects/` directories to the sweep.
+   *
+   * Separate from construction for the reason the other three readers of a
+   * `.claude` tree have it separate: finding them is a `wsl.exe` per
+   * distribution, ~200 ms each cold, and the window must not wait on it. Until
+   * it answers the archive holds this machine's home, which is what it held
+   * before any of this existed.
+   *
+   * Idempotent, safe after `start`, and safe to call with homes already held -
+   * so the startup fan-out and a later call after somebody installs a
+   * distribution are the same call.
+   */
+  useHomes: (homes: readonly WslHome[]) => void
   /** What the archive holds right now. */
   stats: () => ArchiveStats
   /**
-   * Begins watching `projects/` for transcripts that have grown, and drains
-   * whatever backlog the start-up pass did not reach.
+   * Begins watching every home's `projects/` for transcripts that have grown,
+   * and drains whatever backlog the start-up pass did not reach.
+   *
+   * A distro's home is watched only in the sense that it is attempted: the
+   * share behind it carries no change notification at all, and `watchHome`
+   * below has the measurement and what covers it instead.
    *
    * `wake` is what the *watch* calls, and it is the session index's refresh
    * rather than this service's `sweep`: one walk, two consumers. The backlog
@@ -182,7 +243,7 @@ export function createArchiveService({
   onChange
 }: ArchiveServiceDeps): ArchiveService {
   let caughtUp = false
-  let watcher: FSWatcher | null = null
+  let watchers: FSWatcher[] = []
   let debounce: NodeJS.Timeout | null = null
   let debounceSince = 0
   let lastPassAt = 0
@@ -191,6 +252,37 @@ export function createArchiveService({
   let started = false
   /** The last walk, so the backlog drain does not have to repeat it. */
   let lastWalk: Map<string, TranscriptFile> = new Map()
+
+  /**
+   * Every `projects/` the sweep covers, this machine's first.
+   *
+   * A function rather than a captured list, and the header says why. Read on
+   * every sweep and on every watch attempt, so nothing has to be re-plumbed
+   * when the WSL probe lands.
+   */
+  let homes: readonly string[] = [projectsDir]
+  const projectsDirs = (): readonly string[] => homes
+
+  /** What `start` was given, so a home added later can be watched too. */
+  let onWakeHeld: (() => void) | null = null
+
+  /**
+   * One walk across every home, merged the way the session index merges it.
+   *
+   * Session ids are UUIDs, so the union has no key to reconcile - and it is a
+   * union rather than a per-home pass for the reason the usage index states at
+   * its own gather: the reap check in `pass` compares the cursors it knows
+   * against *all* the transcripts on disk at once, so a pass that saw only one
+   * home would read every other home's transcript as reaped, drop its cursor,
+   * and re-read the file from zero on the next pass, for ever.
+   */
+  function walkEveryHome(): Map<string, TranscriptFile> {
+    const found = new Map<string, TranscriptFile>()
+    for (const dir of projectsDirs()) {
+      for (const [sessionId, transcript] of scanTranscripts(dir)) found.set(sessionId, transcript)
+    }
+    return found
+  }
 
   /**
    * Works the backlog forward one chunk per tick until it is gone.
@@ -347,56 +439,102 @@ export function createArchiveService({
     )
   }
 
+  /**
+   * One recursive watch over one home's `projects/`, or none.
+   *
+   * Recursive, and this is the one place in Helm that watches `projects/` that
+   * way.
+   *
+   * `usage.ts` says a recursive watch here "fires on every token a live session
+   * writes - which is the one thing the debounce cannot absorb", and chose a
+   * ten-second stat sweep instead. That is right for the usage index, whose
+   * figures are already being polled on a timer and whose worst case is a
+   * percentage a few seconds old. It is not right here: the event this feature
+   * exists for is a conversation *ending*, and after it ends there is a window
+   * before Claude Code reaps it and nothing at all afterwards.
+   *
+   * The objection is answered rather than ignored. `scheduleWake` is a trailing
+   * debounce with a hard ceiling, so a steady write stream coalesces into one
+   * wake rather than starving the timer, and `MIN_PASS_MS` puts a floor under
+   * how often a pass can run whatever the watch does. The worst case is one
+   * pass every fifteen seconds while somebody is working, which is four times
+   * the sweep the session index already runs.
+   *
+   * **A distro's `projects/` cannot be watched at all, and the failure is a
+   * throw rather than silence.** Measured 2026-09-03, the same measurement
+   * `history.ts` records at its own `rewatch`: `fs.watch` over a `\\wsl$\` path
+   * throws `EISDIR` immediately - on a directory, on a directory recursively,
+   * and on a file - so the 9P share behind it carries no change notification of
+   * any kind. That is what the try/catch is for, and it has to be per home:
+   * this is called once per directory precisely so that the throw from a
+   * distro's cannot take this machine's watch, the backlog drain or the service
+   * down with it.
+   *
+   * The fallback is stated rather than assumed. A distro's transcripts reach the
+   * archive through the **session index's poll** - `history.ts` stats every
+   * home every four seconds and runs a full pass, walk included, every fifteen
+   * ticks, and that walk is what `consume` is handed - and through `sweep()`.
+   * Never through a watch. So a conversation that ends inside a distribution is
+   * archived within a minute rather than within the debounce, which is inside
+   * the criterion this feature has to meet ("within minutes of session
+   * activity") and is the same degradation the watch already has on any
+   * filesystem where recursive watching is missing.
+   */
+  function watchHome(dir: string, onWake: () => void): void {
+    try {
+      const open = watch(dir, { persistent: false, recursive: true }, (_event, name) => {
+        if (name !== null && !String(name).endsWith('.jsonl')) return
+        scheduleWake(onWake)
+      })
+      open.on('error', () => {
+        // Documented as not available everywhere, and recursive watching is the
+        // half most likely to be missing. The session index's own poll still
+        // drives a pass every minute, so this degrades to "within a minute"
+        // rather than to nothing.
+        open.close()
+        watchers = watchers.filter((held) => held !== open)
+      })
+      watchers.push(open)
+    } catch {
+      // Left to the poll and to `sweep()`, as above.
+    }
+  }
+
   return {
     consume: pass,
-    sweep: () => pass(scanTranscripts(projectsDir)),
+    sweep: () => pass(walkEveryHome()),
     stats: () => readArchiveStats(store, maxBytes()),
     ready: () => caughtUp,
+
+    useHomes(next) {
+      // This machine's `projects/` is always the head and is never one of
+      // these, so a distro whose `$HOME` somehow resolved to it cannot be
+      // walked twice - and a repeated call adds nothing.
+      const added = next
+        .map((home) => projectsDirIn(home.claudeHome))
+        .filter((dir) => !homes.some((held) => held.toLowerCase() === dir.toLowerCase()))
+      if (added.length === 0) return
+      homes = [...homes, ...added]
+      const wake = onWakeHeld
+      if (!started || wake === null) return
+      // Nothing is scheduled here on purpose. The fan-out that calls this calls
+      // `history.useHomes` in the same turn, which brings that index's own
+      // refresh forward - and that refresh's walk is the one this service
+      // consumes. A pass of our own would be a second walk of the same
+      // directories in the same second, which is the thing the header says this
+      // file does not do.
+      for (const dir of added) watchHome(dir, wake)
+    },
 
     start(onWake) {
       if (started) return
       started = true
+      onWakeHeld = onWake
       // The first pass has already run by now - it rode the session index's
       // start-up refresh - so this is only about the rest of the backlog, and
       // it can wait a few seconds for the window to settle first.
       scheduleCatchUp(CATCH_UP_AFTER_MS)
-      try {
-        /*
-         * Recursive, and this is the one place in Helm that watches `projects/`
-         * that way.
-         *
-         * `usage.ts` says a recursive watch here "fires on every token a live
-         * session writes - which is the one thing the debounce cannot absorb",
-         * and chose a ten-second stat sweep instead. That is right for the
-         * usage index, whose figures are already being polled on a timer and
-         * whose worst case is a percentage a few seconds old. It is not right
-         * here: the event this feature exists for is a conversation *ending*,
-         * and after it ends there is a window before Claude Code reaps it and
-         * nothing at all afterwards.
-         *
-         * The objection is answered rather than ignored. `scheduleWake` is a
-         * trailing debounce with a hard ceiling, so a steady write stream
-         * coalesces into one wake rather than starving the timer, and
-         * `MIN_PASS_MS` puts a floor under how often a pass can run whatever
-         * the watch does. The worst case is one pass every fifteen seconds
-         * while somebody is working, which is four times the sweep the session
-         * index already runs.
-         */
-        watcher = watch(projectsDir, { persistent: false, recursive: true }, (_event, name) => {
-          if (name !== null && !String(name).endsWith('.jsonl')) return
-          scheduleWake(onWake)
-        })
-        watcher.on('error', () => {
-          // Documented as not available everywhere, and recursive watching is
-          // the half most likely to be missing. The session index's own poll
-          // still drives a pass every minute, so this degrades to "within a
-          // minute" rather than to nothing.
-          watcher?.close()
-          watcher = null
-        })
-      } catch {
-        watcher = null
-      }
+      for (const dir of projectsDirs()) watchHome(dir, onWake)
     },
 
     stop() {
@@ -405,8 +543,9 @@ export function createArchiveService({
       if (catchUp) clearTimeout(catchUp)
       catchUp = null
       started = false
-      watcher?.close()
-      watcher = null
+      onWakeHeld = null
+      for (const open of watchers) open.close()
+      watchers = []
     }
   }
 }

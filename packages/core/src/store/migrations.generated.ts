@@ -10,19 +10,19 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
   {
     "tag": "0000_purple_silver_fox",
     "statements": [
-      "CREATE TABLE `app_settings` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`value` text NOT NULL,\n\t`updated_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
-      "CREATE TABLE `config_snapshots` (\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\n\t`project_path` text NOT NULL,\n\t`file_path` text NOT NULL,\n\t`content` text NOT NULL,\n\t`content_hash` text NOT NULL,\n\t`reason` text NOT NULL,\n\t`created_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
+      "CREATE TABLE `app_settings` (\r\n\t`key` text PRIMARY KEY NOT NULL,\r\n\t`value` text NOT NULL,\r\n\t`updated_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
+      "CREATE TABLE `config_snapshots` (\r\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\r\n\t`project_path` text NOT NULL,\r\n\t`file_path` text NOT NULL,\r\n\t`content` text NOT NULL,\r\n\t`content_hash` text NOT NULL,\r\n\t`reason` text NOT NULL,\r\n\t`created_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
       "CREATE INDEX `config_snapshots_file_idx` ON `config_snapshots` (`project_path`,`file_path`,`created_at`);",
-      "CREATE TABLE `profiles` (\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\n\t`name` text NOT NULL,\n\t`root` text NOT NULL,\n\t`overlays` text DEFAULT '[]' NOT NULL,\n\t`access` text DEFAULT '[]' NOT NULL,\n\t`model` text,\n\t`effort` text,\n\t`permission_mode` text,\n\t`agent` text,\n\t`mcp` text DEFAULT '[]' NOT NULL,\n\t`opening_prompt` text,\n\t`pinned_order` integer,\n\t`created_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\n\t`updated_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
+      "CREATE TABLE `profiles` (\r\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\r\n\t`name` text NOT NULL,\r\n\t`root` text NOT NULL,\r\n\t`overlays` text DEFAULT '[]' NOT NULL,\r\n\t`access` text DEFAULT '[]' NOT NULL,\r\n\t`model` text,\r\n\t`effort` text,\r\n\t`permission_mode` text,\r\n\t`agent` text,\r\n\t`mcp` text DEFAULT '[]' NOT NULL,\r\n\t`opening_prompt` text,\r\n\t`pinned_order` integer,\r\n\t`created_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\r\n\t`updated_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
       "CREATE UNIQUE INDEX `profiles_name_unique` ON `profiles` (`name`);",
-      "CREATE TABLE `projects` (\n\t`path` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`kind` text NOT NULL,\n\t`harness_path` text,\n\t`has_claude_dir` integer DEFAULT false NOT NULL,\n\t`inventory` text NOT NULL,\n\t`git` text,\n\t`last_seen_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
+      "CREATE TABLE `projects` (\r\n\t`path` text PRIMARY KEY NOT NULL,\r\n\t`name` text NOT NULL,\r\n\t`kind` text NOT NULL,\r\n\t`harness_path` text,\r\n\t`has_claude_dir` integer DEFAULT false NOT NULL,\r\n\t`inventory` text NOT NULL,\r\n\t`git` text,\r\n\t`last_seen_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
       "CREATE INDEX `projects_harness_idx` ON `projects` (`harness_path`);"
     ]
   },
   {
     "tag": "0001_calm_cloak",
     "statements": [
-      "CREATE TABLE `sessions` (\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\n\t`name` text NOT NULL,\n\t`cwd` text NOT NULL,\n\t`project_path` text,\n\t`argv` text DEFAULT '[]' NOT NULL,\n\t`status` text DEFAULT 'running' NOT NULL,\n\t`started_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\n\t`ended_at` text,\n\t`duration_ms` integer,\n\t`exit_code` integer\n);",
+      "CREATE TABLE `sessions` (\r\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\r\n\t`name` text NOT NULL,\r\n\t`cwd` text NOT NULL,\r\n\t`project_path` text,\r\n\t`argv` text DEFAULT '[]' NOT NULL,\r\n\t`status` text DEFAULT 'running' NOT NULL,\r\n\t`started_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\r\n\t`ended_at` text,\r\n\t`duration_ms` integer,\r\n\t`exit_code` integer\r\n);",
       "CREATE INDEX `sessions_started_idx` ON `sessions` (`started_at`);",
       "CREATE INDEX `sessions_status_idx` ON `sessions` (`status`);"
     ]
@@ -36,10 +36,10 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
   {
     "tag": "0003_smart_nightmare",
     "statements": [
-      "CREATE TABLE `history_index` (\n\t`file` text PRIMARY KEY NOT NULL,\n\t`bytes` integer NOT NULL,\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
-      "CREATE TABLE `history_prompts` (\n\t`seq` integer PRIMARY KEY NOT NULL,\n\t`session_id` text NOT NULL,\n\t`project` text NOT NULL,\n\t`at` integer NOT NULL,\n\t`text` text NOT NULL\n);",
+      "CREATE TABLE `history_index` (\r\n\t`file` text PRIMARY KEY NOT NULL,\r\n\t`bytes` integer NOT NULL,\r\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
+      "CREATE TABLE `history_prompts` (\r\n\t`seq` integer PRIMARY KEY NOT NULL,\r\n\t`session_id` text NOT NULL,\r\n\t`project` text NOT NULL,\r\n\t`at` integer NOT NULL,\r\n\t`text` text NOT NULL\r\n);",
       "CREATE INDEX `history_prompts_session_idx` ON `history_prompts` (`session_id`,`seq`);",
-      "CREATE TABLE `history_sessions` (\n\t`session_id` text PRIMARY KEY NOT NULL,\n\t`project` text NOT NULL,\n\t`project_key` text NOT NULL,\n\t`prompt_count` integer NOT NULL,\n\t`first_at` integer NOT NULL,\n\t`last_at` integer NOT NULL,\n\t`first_prompt` text NOT NULL,\n\t`transcript_file` text,\n\t`transcript_bytes` integer,\n\t`project_exists` integer DEFAULT false NOT NULL\n);",
+      "CREATE TABLE `history_sessions` (\r\n\t`session_id` text PRIMARY KEY NOT NULL,\r\n\t`project` text NOT NULL,\r\n\t`project_key` text NOT NULL,\r\n\t`prompt_count` integer NOT NULL,\r\n\t`first_at` integer NOT NULL,\r\n\t`last_at` integer NOT NULL,\r\n\t`first_prompt` text NOT NULL,\r\n\t`transcript_file` text,\r\n\t`transcript_bytes` integer,\r\n\t`project_exists` integer DEFAULT false NOT NULL\r\n);",
       "CREATE INDEX `history_sessions_last_idx` ON `history_sessions` (`last_at`);",
       "CREATE INDEX `history_sessions_project_idx` ON `history_sessions` (`project_key`,`last_at`);"
     ]
@@ -47,16 +47,16 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
   {
     "tag": "0004_tan_naoko",
     "statements": [
-      "CREATE TABLE `usage_index` (\n\t`file` text PRIMARY KEY NOT NULL,\n\t`bytes` integer NOT NULL,\n\t`rows` integer DEFAULT 0 NOT NULL,\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
-      "CREATE TABLE `usage_messages` (\n\t`uuid` text PRIMARY KEY NOT NULL,\n\t`at` integer NOT NULL,\n\t`model` text NOT NULL,\n\t`input_tokens` integer DEFAULT 0 NOT NULL,\n\t`output_tokens` integer DEFAULT 0 NOT NULL,\n\t`cache_write_5m_tokens` integer DEFAULT 0 NOT NULL,\n\t`cache_write_1h_tokens` integer DEFAULT 0 NOT NULL,\n\t`cache_read_tokens` integer DEFAULT 0 NOT NULL\n);",
+      "CREATE TABLE `usage_index` (\r\n\t`file` text PRIMARY KEY NOT NULL,\r\n\t`bytes` integer NOT NULL,\r\n\t`rows` integer DEFAULT 0 NOT NULL,\r\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
+      "CREATE TABLE `usage_messages` (\r\n\t`uuid` text PRIMARY KEY NOT NULL,\r\n\t`at` integer NOT NULL,\r\n\t`model` text NOT NULL,\r\n\t`input_tokens` integer DEFAULT 0 NOT NULL,\r\n\t`output_tokens` integer DEFAULT 0 NOT NULL,\r\n\t`cache_write_5m_tokens` integer DEFAULT 0 NOT NULL,\r\n\t`cache_write_1h_tokens` integer DEFAULT 0 NOT NULL,\r\n\t`cache_read_tokens` integer DEFAULT 0 NOT NULL\r\n);",
       "CREATE INDEX `usage_messages_at_idx` ON `usage_messages` (`at`,`model`);"
     ]
   },
   {
     "tag": "0005_puzzling_pete_wisdom",
     "statements": [
-      "CREATE TABLE `pr_repos` (\n\t`path` text PRIMARY KEY NOT NULL,\n\t`url` text,\n\t`slug` text,\n\t`checked_at` text,\n\t`fetched_at` text,\n\t`error` text\n);",
-      "CREATE TABLE `pull_requests` (\n\t`slug` text NOT NULL,\n\t`number` integer NOT NULL,\n\t`summary` text NOT NULL,\n\t`detail` text,\n\t`fetched_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\n\t`detail_fetched_at` text,\n\tPRIMARY KEY(`slug`, `number`)\n);"
+      "CREATE TABLE `pr_repos` (\r\n\t`path` text PRIMARY KEY NOT NULL,\r\n\t`url` text,\r\n\t`slug` text,\r\n\t`checked_at` text,\r\n\t`fetched_at` text,\r\n\t`error` text\r\n);",
+      "CREATE TABLE `pull_requests` (\r\n\t`slug` text NOT NULL,\r\n\t`number` integer NOT NULL,\r\n\t`summary` text NOT NULL,\r\n\t`detail` text,\r\n\t`fetched_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\r\n\t`detail_fetched_at` text,\r\n\tPRIMARY KEY(`slug`, `number`)\r\n);"
     ]
   },
   {
@@ -68,14 +68,14 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
   {
     "tag": "0007_pink_tinkerer",
     "statements": [
-      "CREATE TABLE `transcript_index` (\n\t`file` text PRIMARY KEY NOT NULL,\n\t`bytes` integer NOT NULL,\n\t`messages` integer DEFAULT 0 NOT NULL,\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
-      "CREATE TABLE `transcript_messages` (\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\n\t`uuid` text NOT NULL,\n\t`session_id` text NOT NULL,\n\t`role` text NOT NULL,\n\t`at` integer NOT NULL,\n\t`body` blob NOT NULL,\n\t`compressed` integer DEFAULT false NOT NULL,\n\t`raw_bytes` integer DEFAULT 0 NOT NULL,\n\t`stored_bytes` integer DEFAULT 0 NOT NULL\n);",
+      "CREATE TABLE `transcript_index` (\r\n\t`file` text PRIMARY KEY NOT NULL,\r\n\t`bytes` integer NOT NULL,\r\n\t`messages` integer DEFAULT 0 NOT NULL,\r\n\t`indexed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
+      "CREATE TABLE `transcript_messages` (\r\n\t`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,\r\n\t`uuid` text NOT NULL,\r\n\t`session_id` text NOT NULL,\r\n\t`role` text NOT NULL,\r\n\t`at` integer NOT NULL,\r\n\t`body` blob NOT NULL,\r\n\t`compressed` integer DEFAULT false NOT NULL,\r\n\t`raw_bytes` integer DEFAULT 0 NOT NULL,\r\n\t`stored_bytes` integer DEFAULT 0 NOT NULL\r\n);",
       "CREATE UNIQUE INDEX `transcript_messages_uuid_unique` ON `transcript_messages` (`uuid`);",
       "CREATE INDEX `transcript_messages_session_idx` ON `transcript_messages` (`session_id`,`at`,`id`);",
-      "CREATE TABLE `transcript_sessions` (\n\t`session_id` text PRIMARY KEY NOT NULL,\n\t`source_file` text NOT NULL,\n\t`state` text DEFAULT 'archived' NOT NULL,\n\t`first_at` integer,\n\t`last_at` integer,\n\t`message_count` integer DEFAULT 0 NOT NULL,\n\t`raw_bytes` integer DEFAULT 0 NOT NULL,\n\t`stored_bytes` integer DEFAULT 0 NOT NULL,\n\t`captured_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\n\t`evicted_at` text\n);",
+      "CREATE TABLE `transcript_sessions` (\r\n\t`session_id` text PRIMARY KEY NOT NULL,\r\n\t`source_file` text NOT NULL,\r\n\t`state` text DEFAULT 'archived' NOT NULL,\r\n\t`first_at` integer,\r\n\t`last_at` integer,\r\n\t`message_count` integer DEFAULT 0 NOT NULL,\r\n\t`raw_bytes` integer DEFAULT 0 NOT NULL,\r\n\t`stored_bytes` integer DEFAULT 0 NOT NULL,\r\n\t`captured_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,\r\n\t`evicted_at` text\r\n);",
       "CREATE INDEX `transcript_sessions_oldest_idx` ON `transcript_sessions` (`state`,`last_at`);",
-      "-- Everything below this line is HAND-WRITTEN and drizzle-kit did not produce it.\n-- drizzle-kit does not model virtual tables: it cannot generate an FTS5 table\n-- and it cannot see one that already exists, so it will neither recreate nor\n-- drop what follows. `pnpm db:generate` re-embeds whatever is in this folder,\n-- so this survives regeneration - but a later migration that needs to touch\n-- `transcript_fts` has to carry its own hand-written SQL in the same way. The\n-- reasoning is in `schema.ts`, under the three tables above.\n--\n-- `content=''` because the message text is not stored in plain form anywhere:\n-- `transcript_messages.body` is a compressed blob, so there is no column for an\n-- external-content FTS table to read and no column an INSERT trigger could read\n-- either. The index is written in code, beside the row it indexes and inside\n-- the same transaction (`store/archive.ts`).\n--\n-- `contentless_delete=1` is what makes the DELETE below legal - without it\n-- SQLite refuses to delete from a contentless FTS5 table, because it does not\n-- hold the text it would need to un-index. SQLite 3.43+; better-sqlite3 13\n-- bundles 3.53.\n--\n-- `unicode61 remove_diacritics 2` is the default tokenizer stated rather than\n-- assumed, so a future SQLite changing its default cannot silently re-tokenize\n-- an index nothing rebuilds.\nCREATE VIRTUAL TABLE `transcript_fts` USING fts5(\n  text,\n  content='',\n  contentless_delete=1,\n  tokenize=\"unicode61 remove_diacritics 2\"\n);",
-      "-- The DELETE is a trigger and the INSERT is not, and the asymmetry is the\n-- design. A delete needs only `old.id`, and eviction is the one path that would\n-- otherwise leave index entries pointing at messages that no longer exist - a\n-- search that returned rowids the message table cannot resolve. Putting it in\n-- the schema means it cannot be forgotten by a caller.\nCREATE TRIGGER `transcript_fts_delete` AFTER DELETE ON `transcript_messages` BEGIN\n  DELETE FROM `transcript_fts` WHERE rowid = old.`id`;\nEND;"
+      "-- Everything below this line is HAND-WRITTEN and drizzle-kit did not produce it.\r\n-- drizzle-kit does not model virtual tables: it cannot generate an FTS5 table\r\n-- and it cannot see one that already exists, so it will neither recreate nor\r\n-- drop what follows. `pnpm db:generate` re-embeds whatever is in this folder,\r\n-- so this survives regeneration - but a later migration that needs to touch\r\n-- `transcript_fts` has to carry its own hand-written SQL in the same way. The\r\n-- reasoning is in `schema.ts`, under the three tables above.\r\n--\r\n-- `content=''` because the message text is not stored in plain form anywhere:\r\n-- `transcript_messages.body` is a compressed blob, so there is no column for an\r\n-- external-content FTS table to read and no column an INSERT trigger could read\r\n-- either. The index is written in code, beside the row it indexes and inside\r\n-- the same transaction (`store/archive.ts`).\r\n--\r\n-- `contentless_delete=1` is what makes the DELETE below legal - without it\r\n-- SQLite refuses to delete from a contentless FTS5 table, because it does not\r\n-- hold the text it would need to un-index. SQLite 3.43+; better-sqlite3 13\r\n-- bundles 3.53.\r\n--\r\n-- `unicode61 remove_diacritics 2` is the default tokenizer stated rather than\r\n-- assumed, so a future SQLite changing its default cannot silently re-tokenize\r\n-- an index nothing rebuilds.\r\nCREATE VIRTUAL TABLE `transcript_fts` USING fts5(\r\n  text,\r\n  content='',\r\n  contentless_delete=1,\r\n  tokenize=\"unicode61 remove_diacritics 2\"\r\n);",
+      "-- The DELETE is a trigger and the INSERT is not, and the asymmetry is the\r\n-- design. A delete needs only `old.id`, and eviction is the one path that would\r\n-- otherwise leave index entries pointing at messages that no longer exist - a\r\n-- search that returned rowids the message table cannot resolve. Putting it in\r\n-- the schema means it cannot be forgotten by a caller.\r\nCREATE TRIGGER `transcript_fts_delete` AFTER DELETE ON `transcript_messages` BEGIN\r\n  DELETE FROM `transcript_fts` WHERE rowid = old.`id`;\r\nEND;"
     ]
   },
   {
@@ -88,7 +88,7 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
   {
     "tag": "0009_wet_ozymandias",
     "statements": [
-      "CREATE TABLE `history_names` (\n\t`session_id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`renamed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\n);",
+      "CREATE TABLE `history_names` (\r\n\t`session_id` text PRIMARY KEY NOT NULL,\r\n\t`name` text NOT NULL,\r\n\t`renamed_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL\r\n);",
       "ALTER TABLE `history_prompts` ADD `title_rank` integer;",
       "ALTER TABLE `history_sessions` ADD `title_prompt` text;"
     ]
@@ -103,6 +103,12 @@ export const MIGRATIONS: readonly EmbeddedMigration[] = [
     "tag": "0011_brave_senator_kelly",
     "statements": [
       "ALTER TABLE `sessions` ADD `claude_session_id` text;"
+    ]
+  },
+  {
+    "tag": "0012_previous_lifeguard",
+    "statements": [
+      "ALTER TABLE `profiles` ADD `target` text;"
     ]
   }
 ]

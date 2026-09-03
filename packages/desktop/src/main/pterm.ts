@@ -1,8 +1,9 @@
 import type { BrowserWindow } from 'electron'
 import { execFileSync } from 'node:child_process'
 import { lstatSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import type { DetectedShell } from '@helm/core'
+import { wslDistroOf, type DetectedShell } from '@helm/core'
 import { getSession, killSession, spawnSession } from './pty'
 
 /**
@@ -330,14 +331,38 @@ export function createPtermHost(deps: PtermDeps): PtermHost {
     }
   }
 
+  /**
+   * How to open a shell *in* a folder, which is not the same question for every
+   * folder.
+   *
+   * A project inside a WSL distribution is served by that distribution's own
+   * login shell, for the same reason its sessions run that distribution's
+   * `claude`: the folder is Linux, and the tools somebody wants their hands on
+   * there are Linux ones. PowerShell in `\\wsl$\Ubuntu\home\me\thing` would be
+   * the wrong shell even if it started - and it does not start, because
+   * `CreateProcess` refuses a UNC working directory outright. So the pane was
+   * offering a terminal that could only fail.
+   *
+   * `--cd` takes the Windows spelling and translates it itself, so the path
+   * needs no translation here; what does need care is `cwd`, which is where
+   * *this* process starts `wsl.exe` and therefore may not be the UNC path. The
+   * home directory, exactly as `sessions.ts` does it.
+   */
+  const shellPlan = (file: string, request: OpenShellRequest): { file: string; args: string[]; cwd: string } => {
+    const distro = wslDistroOf(request.path)
+    if (distro === null) return { file, args: shellArgs(file), cwd: request.path }
+    return { file: 'wsl.exe', args: ['-d', distro, '--cd', request.path], cwd: homedir() }
+  }
+
   const start = (id: number, file: string, request: OpenShellRequest): void => {
+    const plan = shellPlan(file, request)
     spawnSession({
       id: `shell:${String(id)}`,
-      file,
-      args: shellArgs(file),
+      file: plan.file,
+      args: plan.args,
       cols: request.cols,
       rows: request.rows,
-      cwd: request.path,
+      cwd: plan.cwd,
       onData: (chunk) => {
         const win = deps.window()
         if (win && !win.isDestroyed()) win.webContents.send('pterm:data', { id, data: chunk })
@@ -358,7 +383,16 @@ export function createPtermHost(deps: PtermDeps): PtermHost {
         return { id: existing.id, shell: existing.shell, requested: null, problem: null }
       }
 
-      const wanted = request.shell ?? deps.defaultShell() ?? autoShell()
+      /*
+       * The shell setting is a *Windows* shell, so it does not decide this for
+       * a folder inside a distribution - the distro's own login shell does, and
+       * `wsl.exe` with no command is how you ask for it. Recorded as `wsl.exe`
+       * so the pane names what is actually running rather than the PowerShell
+       * nobody started.
+       */
+      const distro = wslDistroOf(request.path)
+      const wanted =
+        distro !== null ? 'wsl.exe' : (request.shell ?? deps.defaultShell() ?? autoShell())
       const id = nextId++
 
       let shell = wanted
@@ -377,6 +411,11 @@ export function createPtermHost(deps: PtermDeps): PtermHost {
         // memoised at first use, so a shell that goes away while Helm is open
         // is still in it. Trying it again and rethrowing left the pane with the
         // empty box this branch exists to prevent.
+        // No alternatives inside a distribution. Every candidate here is a
+        // Windows shell and the working directory is a UNC path, so each one
+        // would fail the same way - and a "we fell back to PowerShell" notice
+        // over a Linux folder would be describing a shell nobody could use.
+        if (distro !== null) throw err
         const started = alternativesTo(wanted).find((candidate) => {
           try {
             start(id, candidate, request)

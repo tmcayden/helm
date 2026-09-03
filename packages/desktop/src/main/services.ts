@@ -19,6 +19,7 @@ import {
   type Store
 } from '@helm/core'
 import { dbFile, shimRoot, templatesDir } from './paths'
+import { wslHomes } from './wsl'
 
 /**
  * The main process's stateful bits, in one object rather than module-level
@@ -135,7 +136,11 @@ export async function ensureScanRoots(services: Services): Promise<string[]> {
   if (services.settings.scanRoots.length > 0) return services.settings.scanRoots
   if (needsFirstRun(services)) return []
 
-  const suggested = await suggestRoots()
+  // Same list the setup pane offers, distro homes included - a profile that
+  // adopts here and a profile that is asked must never be pointed at different
+  // places, which is what a second call site with a shorter argument list would
+  // quietly produce.
+  const suggested = await suggestRoots(process.cwd(), await wslHomes())
   if (suggested.length === 0) return []
   updateSettings(services, { scanRoots: suggested })
   return suggested
