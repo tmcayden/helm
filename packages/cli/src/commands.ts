@@ -97,6 +97,12 @@ export const COMMANDS: readonly Command[] = [
     run: async (ctx) => (await import('./commands/menu.ts')).menu(ctx)
   },
   {
+    name: 'keys',
+    usage: 'helm keys [--json]',
+    summary: 'Helm\'s keybinds; what `prefix Space ?` shows',
+    run: async (ctx) => (await import('./commands/keys.ts')).keys(ctx)
+  },
+  {
     name: 'config tree',
     usage: 'helm config tree <scope dir | --user> [--json]',
     summary: 'a .claude tree with live states',

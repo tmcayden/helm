@@ -6,25 +6,46 @@
  */
 export const SNIPPET_HEADER = '# helm: written by helm install; do not edit'
 
+export interface HelmBinding {
+  /** The key in the `helm` table, as tmux spells it. */
+  key: string
+  /** The tmux command bound to it. */
+  runs: string
+  description: string
+}
+
+const POPUP = "display-popup -E -w 80% -h 60% -d '#{pane_current_path}'"
+
 /**
  * The `helm` key table. Short-lived things are popups, long-lived things are
  * panes. `c` picks in a popup and opens the pane from inside it, the way `p`
  * does, because a shell one-liner nested inside a tmux single-quoted string
  * cannot quote an empty result, and an empty result is the cancel.
  *
+ * `helm keys` renders this same table, so the help cannot drift from the
+ * bindings.
+ */
+export const HELM_BINDINGS: readonly HelmBinding[] = [
+  { key: 'p', runs: `${POPUP} 'helm pick profile'`, description: 'pick a profile and open it in a new window' },
+  { key: 'h', runs: `${POPUP} 'helm menu'`, description: 'the Helm menu' },
+  { key: 'e', runs: "split-window -h -c '#{pane_current_path}' 'helm view effective'", description: "effective view for this window's profile in a split" },
+  { key: 'c', runs: `${POPUP} 'helm pick scope --view'`, description: 'pick a config scope and view it in a split' },
+  { key: 'u', runs: "split-window -h -c '#{pane_current_path}' 'helm view config --user'", description: 'view ~/.claude in a split' },
+  { key: '?', runs: "display-popup -E -w 60% -h 50% 'helm keys'", description: 'this list' },
+  { key: 'Escape', runs: 'switch-client -T root', description: 'leave the helm table' }
+]
+
+/**
  * The status-right append is guarded: `-ga` appends on every `source-file`,
  * and the user's `prefix r` re-sources the whole config.
  */
-export const TMUX_SNIPPET = `${SNIPPET_HEADER}
-bind-key Space switch-client -T helm
-bind-key -T helm p display-popup -E -w 80% -h 60% -d '#{pane_current_path}' 'helm pick profile'
-bind-key -T helm h display-popup -E -w 80% -h 60% -d '#{pane_current_path}' 'helm menu'
-bind-key -T helm e split-window -h -c '#{pane_current_path}' 'helm view effective'
-bind-key -T helm c display-popup -E -w 80% -h 60% -d '#{pane_current_path}' 'helm pick scope --view'
-bind-key -T helm u split-window -h -c '#{pane_current_path}' 'helm view config --user'
-bind-key -T helm Escape switch-client -T root
-if-shell -F '#{m:*HELM*,#{status-right}}' '' "set-option -ga status-right '#{?#{==:#{client_key_table},helm},#[reverse] HELM #[noreverse],}'"
-`
+export const TMUX_SNIPPET = [
+  SNIPPET_HEADER,
+  'bind-key Space switch-client -T helm',
+  ...HELM_BINDINGS.map((b) => `bind-key -T helm ${b.key} ${b.runs}`),
+  `if-shell -F '#{m:*HELM*,#{status-right}}' '' "set-option -ga status-right '#{?#{==:#{client_key_table},helm},#[reverse] HELM #[noreverse],}'"`,
+  ''
+].join('\n')
 
 /**
  * The `claude` wrapper measured in the spike, verbatim, plus Helm's Space chord

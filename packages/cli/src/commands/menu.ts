@@ -39,7 +39,8 @@ export async function menu(_ctx: CommandContext): Promise<number> {
     { label: 'history        the session index', run: thenWait(['history']) },
     { label: 'sessions       live sessions on this machine', run: thenWait(['sessions']) },
     { label: 'config         a .claude tree in nvim', run: viewConfig },
-    { label: 'doctor         claude doctor plus Helm\'s checks', run: thenWait(['doctor']) }
+    { label: 'doctor         claude doctor plus Helm\'s checks', run: thenWait(['doctor']) },
+    { label: 'keys           Helm\'s keybinds', run: () => inPopup(['keys']) }
   ]
   const chosen = pick(rows.map((row) => ({ label: row.label, value: row })), 'helm')
   return chosen === null ? 0 : chosen.run()

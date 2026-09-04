@@ -151,6 +151,10 @@ helm.nvim buffers, so the letters are the same everywhere.
 | `helm: e` | `split-window -h -- helm view effective` | a pane with nvim on what `claude` loads for this window's profile |
 | `helm: c` | a scope picker, then `helm view config <scope>` | a pane with nvim on that `.claude` tree |
 | `helm: u` | `helm view config --user` | the same for `~/.claude` |
+| `helm: ?` | `helm keys` in a popup | this table, plus the zsh chord and the helm.nvim keys |
+
+`helm keys` and `helm.tmux` are both rendered from `HELM_BINDINGS` in
+`snippets.ts`, so the help cannot drift from the bindings.
 
 The cost is one keystroke per Helm action. A gesture that turns out to be
 constant may also get a direct prefix binding later without leaving the table.
