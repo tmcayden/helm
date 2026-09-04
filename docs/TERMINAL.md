@@ -277,10 +277,30 @@ What it changes: nothing - the function is `helm.zsh` as already written.
 
 ### Does a view pane behave?
 
-**Verdict: Measured separately; see below.**
+**Verdict: YES, 2026-09-04, NVIM v0.12.2, tmux 3.4.** `split-window -h -- helm
+view effective` from a zsh pane: split to nvim painted / `:q` to pane
+reclaimed 27/20, 28/21, 27/21 ms. From a pane running a live `claude` 2.1.260
+at its prompt: 46/22, 32/23, 31/22 ms, and the claude pane survived every
+time with its prompt repainted at the restored width. The buffer options
+that make `:q` clean with no "no write since last change" prompt:
+buftype=nofile, bufhidden=wipe, noswapfile, lines set while modifiable and
+then modified=false, modifiable=false, readonly. The `BufReadCmd helm://*`
+autocommand must exist before the argument buffer is read, so it lives in
+`plugin/helm.lua` (sourced at startup by lazy.nvim), not in a lazily
+required module: measured, `nvim -c` painted an empty buffer and
+`nvim --cmd` painted correctly. Two facts for the checks that drive this:
+`tmux send-keys` feeds the pane's pty and never fires a key-table binding,
+so a scripted verification attaches its own client on a pty it owns, runs
+`switch-client -c <client> -T helm`, and writes the key byte (binding fired
+in 9 ms, nvim painted in 15 ms); and `#{client_key_table}` is read with
+`tmux list-clients -F`, because `display -p` resolved against a different
+client and answered `root` while the table was active. `split-window -e
+PATH=...` did not take effect, so `helm` must be on the tmux server's PATH,
+which `~/.local/bin` is.
 
-Three trials each. What comes out decides whether the plugin is written next
-or the CLI shape changes first.
+What it changes: helm.nvim registers its BufReadCmd in plugin/, the
+status-line indicator uses `client_key_table`, and the verification pass
+drives bindings through an attached client rather than send-keys.
 
 ## 10. Installation
 
@@ -338,6 +358,9 @@ distribution convenience for later and changes nothing above.
 - 2026-09-04: Node 26 is the runtime on this machine, not the 22 the kickoff
   assumed; the bundle targets node22 syntax and `helm doctor` checks for
   >=22, because better-sqlite3's prebuild is N-API and works across majors.
+- 2026-09-04: helm.nvim's `helm://` BufReadCmd is registered eagerly in
+  `plugin/helm.lua` rather than on a lazy trigger, because the buffer named
+  on nvim's command line is read before any lazy handler would have run.
 - 2026-09-04: Windows-only test fixtures run through an explicit win32 branch
   or are skipped on posix with a stated reason, never weakened, because the
   Electron app's behaviour must stay byte-identical and the suite must be
