@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { SNIPPET_HEADER } from './snippets.ts'
 
@@ -11,6 +12,21 @@ export function backupName(file: string, at: Date = new Date()): string {
 
 export function hasLine(text: string, line: string): boolean {
   return text.split('\n').some((l) => l.trim() === line.trim())
+}
+
+/**
+ * A hand-written dotfile may source the snippet as `~/.config/...`, inside an
+ * `if-shell`, or with the absolute path; any uncommented line that sources
+ * the file counts, not only the one `helm install` would append.
+ */
+export function sourcesFile(text: string, file: string): boolean {
+  const home = homedir()
+  const spellings = [file, ...(file.startsWith(`${home}/`) ? [`~${file.slice(home.length)}`, `$HOME${file.slice(home.length)}`] : [])]
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => !l.startsWith('#'))
+    .some((l) => /(^|[\s'"])(source|source-file|\.)\s/.test(l) && spellings.some((f) => l.includes(f)))
 }
 
 /** The text with `line` appended once, or unchanged when it is already there. */

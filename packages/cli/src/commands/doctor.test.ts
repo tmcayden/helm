@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SNIPPET_HEADER, TMUX_SNIPPET } from '../snippets.ts'
@@ -28,10 +28,17 @@ describe('doctor rows', () => {
 
   it('checks a dotfile for its line and a symlink for its target', () => {
     const d = dir()
-    writeFileSync(join(d, 'rc'), 'a\nsource-file x\n')
-    expect(dotfileRow('rc', join(d, 'rc'), 'source-file x').ok).toBe(true)
-    expect(dotfileRow('rc', join(d, 'rc'), 'source-file y').ok).toBe(false)
-    expect(dotfileRow('rc', join(d, 'nope'), 'x').ok).toBe(false)
+    const snippet = join(homedir(), '.config', 'helm', 'helm.tmux')
+    const tilde = `~${snippet.slice(homedir().length)}`
+    writeFileSync(join(d, 'rc'), `a\nsource-file ${snippet}\n`)
+    expect(dotfileRow('rc', join(d, 'rc'), snippet, 'source-file x').ok).toBe(true)
+    writeFileSync(join(d, 'rc'), `if-shell '[ -f ${tilde} ]' 'source-file ${tilde}'\n`)
+    expect(dotfileRow('rc', join(d, 'rc'), snippet, 'source-file x').ok).toBe(true)
+    writeFileSync(join(d, 'rc'), `# source-file ${snippet}\n[ -f ${tilde} ] && source ${tilde}\n`)
+    expect(dotfileRow('rc', join(d, 'rc'), snippet, 'source-file x').ok).toBe(true)
+    writeFileSync(join(d, 'rc'), `# source-file ${snippet}\necho ${snippet}\n`)
+    expect(dotfileRow('rc', join(d, 'rc'), snippet, 'source-file x').ok).toBe(false)
+    expect(dotfileRow('rc', join(d, 'nope'), snippet, 'x').ok).toBe(false)
     writeFileSync(join(d, 'bundle.mjs'), '')
     symlinkSync(join(d, 'bundle.mjs'), join(d, 'helm'))
     expect(symlinkRow(join(d, 'helm'), join(d, 'bundle.mjs')).ok).toBe(true)

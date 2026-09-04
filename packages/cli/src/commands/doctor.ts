@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { claudeHome } from '@helm/core'
 import { bundleFile } from '../bundle.ts'
 import type { CommandContext } from '../command.ts'
-import { hasLine, isHelmSnippet } from '../dotfiles.ts'
+import { isHelmSnippet, sourcesFile } from '../dotfiles.ts'
 import { isHarnessDir } from '../harnesses.ts'
 import type { DoctorReport, DoctorRow } from '../json.ts'
 import { print, printJson } from '../output.ts'
@@ -69,9 +69,9 @@ export function snippetRow(name: string, file: string, expected: string): Doctor
   return row(name, false, `${file} was not written by helm install`)
 }
 
-export function dotfileRow(name: string, file: string, line: string): DoctorRow {
+export function dotfileRow(name: string, file: string, snippet: string, line: string): DoctorRow {
   try {
-    return hasLine(readFileSync(file, 'utf8'), line)
+    return sourcesFile(readFileSync(file, 'utf8'), snippet)
       ? row(name, true, `${file} sources it`)
       : row(name, false, `${file} lacks: ${line}`)
   } catch (err) {
@@ -109,8 +109,8 @@ export async function doctorRows(runClaudeDoctor: boolean): Promise<DoctorRow[]>
   const rows: DoctorRow[] = [nodeRow(process.version), toolRow('claude'), signInRow(), toolRow('tmux', ['-V']), toolRow('nvim'), toolRow('fzf'), toolRow('ss'), dataRow()]
   rows.push(snippetRow('helm.tmux', tmuxSnippet(), TMUX_SNIPPET))
   rows.push(snippetRow('helm.zsh', zshSnippet(), ZSH_SNIPPET))
-  rows.push(dotfileRow('.tmux.conf', join(homedir(), '.tmux.conf'), TMUX_SOURCE_LINE(tmuxSnippet())))
-  rows.push(dotfileRow('.zshrc', join(homedir(), '.zshrc'), ZSH_SOURCE_LINE(zshSnippet())))
+  rows.push(dotfileRow('.tmux.conf', join(homedir(), '.tmux.conf'), tmuxSnippet(), TMUX_SOURCE_LINE(tmuxSnippet())))
+  rows.push(dotfileRow('.zshrc', join(homedir(), '.zshrc'), zshSnippet(), ZSH_SOURCE_LINE(zshSnippet())))
   rows.push(symlinkRow(defaultSymlink(), bundleFile()))
   rows.push(
     existsSync(join(templatesDir(), 'README.md'))
