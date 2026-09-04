@@ -3,12 +3,12 @@ import { homedir } from 'node:os'
 import { basename } from 'node:path'
 import {
   launchTarget,
-  buildResumeArgs,
   finishSession,
   historyTitle,
   launchRequestFromProfile,
   newClaudeSessionId,
   prepareLaunch,
+  prepareResume,
   readGitBranch,
   readHistorySession,
   readProfile,
@@ -776,19 +776,6 @@ export function createSessionHost({
       )
 
       /*
-       * A resumed session gets the browser tools too, and it goes through the
-       * same core writer rather than a second one - `writeSessionMcpConfig` is
-       * what `prepareLaunch` calls, and this is the one launch path that does
-       * not build its argv there. What it must **not** borrow from
-       * `prepareLaunch` is everything else: `-n`, a model, an overlay set. The
-       * conversation was had under whatever it was had under.
-       */
-      const tools = registerBrowserTools(label)
-      const mcpConfigFile =
-        tools === null ? null : writeSessionMcpConfig(tools.mcp.dir, tools.mcp.servers)
-      attachBrowserTools(tools?.token ?? null, mcpConfigFile)
-
-      /*
        * The recorded directory, in the spelling the rest of Helm uses.
        *
        * A distro's CLI wrote down `/home/me/harness`, because that is what it
@@ -810,11 +797,40 @@ export function createSessionHost({
           ? (toWindowsPath(history.project, { distro: target.distro }) ?? history.project)
           : history.project
 
+      /*
+       * A resumed session gets the browser tools too, and it goes through the
+       * same core writer rather than a second one - `writeSessionMcpConfig` is
+       * what `prepareLaunch` calls, and this is the one launch path that does
+       * not build its argv there. What it must **not** borrow from
+       * `prepareLaunch` is everything else: `-n`, a model, an overlay set. The
+       * conversation was had under whatever it was had under.
+       *
+       * The two things it *does* borrow are the two a resume into a distro was
+       * missing until 2026-09-03, and both are here rather than above because
+       * both need the target, which is read off the transcript: the same
+       * `toolsGate` a launch takes, so a distro that cannot reach the endpoint
+       * is told rather than handed a config for a port it cannot open, and
+       * `prepareResume` for the argv, which is what puts the `--mcp-config`
+       * path in the spelling the distro's CLI will read it in.
+       */
+      const gate = await toolsGate(target)
+      const tools = gate.allowed ? registerBrowserTools(label) : null
+      const mcpConfigFile =
+        tools === null ? null : writeSessionMcpConfig(tools.mcp.dir, tools.mcp.servers)
+      attachBrowserTools(tools?.token ?? null, mcpConfigFile)
+
+      const resumePlan = prepareResume({
+        sessionId: history.sessionId,
+        mcpConfigFile,
+        target
+      })
+      if (gate.note !== null) resumePlan.warnings.push(gate.note)
+
       const session = await spawn(
         {
           cwd,
           name: label,
-          argv: buildResumeArgs(history.sessionId, mcpConfigFile),
+          argv: resumePlan.argv,
           overlays: [],
           memoryFile: null,
           mcpConfigFile,
@@ -847,14 +863,14 @@ export function createSessionHost({
            * exactly what this avoids.
            */
           target,
-          warnings: []
+          warnings: resumePlan.warnings
         },
         req,
         { projectPath: history.project },
         tools?.token ?? null
       )
 
-      return { session, history }
+      return { session, history, warnings: resumePlan.warnings }
     },
 
     /**

@@ -64,6 +64,17 @@ export interface HistoryState {
   resuming: string | null
   resumeError: string | null
   dismissResumeError: () => void
+  /**
+   * What the resume did anyway, having lost something doing it.
+   *
+   * Separate from `resumeError` because it is not one: the session started and
+   * the pane has already navigated to its tab. A resume into a distro can come
+   * up without Helm's own tools - an unreachable endpoint, a config path with
+   * no spelling inside that distro - and the launch path has said so out loud
+   * since profiles existed. This is that sentence for the other launch path.
+   */
+  resumeNotice: string | null
+  dismissResumeNotice: () => void
 }
 
 /** Electron prefixes a renderer-side rejection with the channel it came from. */
@@ -116,6 +127,15 @@ export function useHistory(): HistoryState {
   const [refreshing, setRefreshing] = useState(false)
   const [resuming, setResuming] = useState<string | null>(null)
   const [resumeError, setResumeError] = useState<string | null>(null)
+  const [resumeNotice, setResumeNotice] = useState<string | null>(null)
+
+  // An acknowledgement goes away on its own; an error waits to be dismissed.
+  // The same split, and the same nine seconds, as `useProfiles`.
+  useEffect(() => {
+    if (resumeNotice === null) return
+    const timer = setTimeout(() => setResumeNotice(null), 9000)
+    return () => clearTimeout(timer)
+  }, [resumeNotice])
 
   useEffect(() => {
     const off = helm.on('history:changed', setSummary)
@@ -271,6 +291,7 @@ export function useHistory(): HistoryState {
   const resume = useCallback(
     async (session: HistorySession, paneSize: HTMLElement | null) => {
       setResumeError(null)
+      setResumeNotice(null)
       setResuming(session.sessionId)
       try {
         const { cols, rows } = estimateGrid(paneSize)
@@ -279,6 +300,7 @@ export function useHistory(): HistoryState {
           cols,
           rows
         })
+        if (result.warnings.length > 0) setResumeNotice(result.warnings.join(' '))
         return result.session
       } catch (err: unknown) {
         setResumeError(readable(err))
@@ -339,6 +361,8 @@ export function useHistory(): HistoryState {
     resume,
     resuming,
     resumeError,
-    dismissResumeError: useCallback(() => setResumeError(null), [])
+    dismissResumeError: useCallback(() => setResumeError(null), []),
+    resumeNotice,
+    dismissResumeNotice: useCallback(() => setResumeNotice(null), [])
   }
 }

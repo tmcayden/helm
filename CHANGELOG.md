@@ -14,6 +14,23 @@ A version with no section here does not release: the workflow fails rather than
 publishing an empty body, because the step a person can skip is the step that
 gets skipped.
 
+## 1.2.1
+
+Reopening a conversation that lives in a WSL distribution failed to start at
+all. It works again, and a resume that has to do without Helm's own tools now
+tells you instead of going quiet.
+
+**Resuming a session inside a distribution**
+
+- Picking a session from Session history whose conversation lives in a
+  distribution now starts it. It used to hand the distribution's Claude Code a
+  Windows path it could not read, and the session ended before it opened with
+  an "MCP config file not found" error naming a path nothing had created.
+- Such a resume now checks Helm's browser and session tools can be reached from
+  the distribution, the same check a launch has always made. When they cannot,
+  the session still opens and says so, rather than starting without them for no
+  stated reason.
+
 ## 1.2.0
 
 Helm can now run your sessions inside WSL. A profile picks where its Claude

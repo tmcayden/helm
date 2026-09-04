@@ -2664,7 +2664,8 @@ export function App(): JSX.Element {
             problem line instead - see `failed` in `useBrowsers`. */}
         {(profileState.notice !== null ||
           profileState.error !== null ||
-          browsers.error !== null) && (
+          browsers.error !== null ||
+          historyState.resumeNotice !== null) && (
           <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex justify-center p-3">
             {/*
               Two elements for one island, and the outer one is the fix rather
@@ -2689,7 +2690,10 @@ export function App(): JSX.Element {
                 )}
               >
                 <span className="min-w-0">
-                  {browsers.error ?? profileState.error ?? profileState.notice}
+                  {browsers.error ??
+                    profileState.error ??
+                    profileState.notice ??
+                    historyState.resumeNotice}
                 </span>
                 <button
                   type="button"
@@ -2698,7 +2702,9 @@ export function App(): JSX.Element {
                       ? browsers.dismissError
                       : profileState.error !== null
                         ? profileState.dismissError
-                        : profileState.dismissNotice
+                        : profileState.notice !== null
+                          ? profileState.dismissNotice
+                          : historyState.dismissResumeNotice
                   }
                   aria-label="Dismiss"
                   className="shrink-0 text-fg-subtle hover:text-fg"

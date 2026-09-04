@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { cleanStaleMcpConfigs, removeSessionMcpConfig, writeSessionMcpConfig } from './mcp'
-import { buildLaunchArgs, prepareLaunch } from './plan'
+import { buildLaunchArgs, prepareLaunch, prepareResume } from './plan'
 
 let root: string
 let shimRoot: string
@@ -505,5 +505,69 @@ describe('a project that lives inside a distro', () => {
     })
     expect(plan.target).toEqual({ kind: 'wsl', distro: 'Ubuntu' })
     expect(plan.warnings.join(' ')).toMatch(/Debian/)
+  })
+})
+
+/**
+ * A resume into a distro, which for a while handed the CLI a Windows path.
+ *
+ * `--mcp-config C:\Users\...\mcp-1234-abc.json` inside a distro is not a
+ * session missing a feature - the shell eats the backslashes, the remains
+ * resolve against the cwd, and the CLI refuses to start on a path nothing could
+ * have created. Measured 2026-09-03; the reported error named
+ * `<cwd>/C:Users...json`, which is that mangling exactly.
+ */
+describe('prepareResume', () => {
+  const ID = '7d2b0a1e-0000-4000-8000-000000000001'
+  const CONFIG = 'C:\\Users\\me\\AppData\\Roaming\\Helm\\mcp\\mcp-1234-abcdef012345.json'
+
+  it('is the id alone when the host wrote no config', () => {
+    expect(prepareResume({ sessionId: ID }).argv).toEqual(['--resume', ID])
+  })
+
+  it('leaves a Windows target’s path alone', () => {
+    const { argv, warnings } = prepareResume({ sessionId: ID, mcpConfigFile: CONFIG })
+    expect(argv).toEqual(['--resume', ID, '--mcp-config', CONFIG])
+    expect(warnings).toEqual([])
+  })
+
+  it('translates the config path for a distro, and never passes a drive letter', () => {
+    const { argv, warnings } = prepareResume({
+      sessionId: ID,
+      mcpConfigFile: CONFIG,
+      target: { kind: 'wsl', distro: 'Ubuntu' }
+    })
+    const at = argv.indexOf('--mcp-config')
+    expect(at).toBeGreaterThan(-1)
+    expect(argv[at + 1]).toBe(
+      '/mnt/c/Users/me/AppData/Roaming/Helm/mcp/mcp-1234-abcdef012345.json'
+    )
+    // The whole of the bug, stated as the thing that must never be on the argv.
+    expect(argv.join(' ')).not.toContain('\\')
+    expect(argv.join(' ')).not.toMatch(/[A-Za-z]:/)
+    expect(warnings).toEqual([])
+  })
+
+  it('drops the flag rather than passing a path the distro has no spelling for', () => {
+    const { argv, warnings } = prepareResume({
+      sessionId: ID,
+      // Another distro's filesystem. `toWslPath` refuses it rather than
+      // approximating, and a resume must not then fall back to the raw path.
+      mcpConfigFile: '\\\\wsl$\\Debian\\home\\me\\mcp.json',
+      target: { kind: 'wsl', distro: 'Ubuntu' }
+    })
+    expect(argv).toEqual(['--resume', ID])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('Ubuntu')
+  })
+
+  it('still passes no -n, so resuming cannot rename the conversation', () => {
+    const { argv } = prepareResume({
+      sessionId: ID,
+      mcpConfigFile: CONFIG,
+      target: { kind: 'wsl', distro: 'Ubuntu' }
+    })
+    expect(argv).not.toContain('-n')
+    expect(argv.indexOf(ID)).toBe(argv.indexOf('--resume') + 1)
   })
 })

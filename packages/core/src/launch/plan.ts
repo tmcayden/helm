@@ -17,7 +17,7 @@ import {
   type OverlayPlan
 } from './overlay'
 import { writeSessionMcpConfig, type SessionMcpServer } from './mcp'
-import { sanitizeSessionName } from './session'
+import { buildResumeArgs, sanitizeSessionName } from './session'
 
 /**
  * A profile becomes argv.
@@ -82,6 +82,11 @@ export interface LaunchRequest {
  * exist, and the CLI's own answer to that is worse than Helm's - it either
  * fails the launch or silently grants nothing. See `toWslPath` for which paths
  * are undecidable and why they are not guessed.
+ *
+ * `prepareLaunch` is not the only thing that assembles argv. A resume builds
+ * its own - it must not borrow a model or an overlay set from anywhere - and
+ * for a while that meant it skipped this too, which is what `prepareResume`
+ * below exists to make impossible.
  */
 function translatePaths(
   paths: readonly string[],
@@ -381,4 +386,43 @@ export function prepareLaunch(req: LaunchRequest): LaunchPlan {
 /** What to call a target in a sentence a user reads. */
 function targetName(target: LaunchTarget): string {
   return target.kind === 'wsl' ? target.distro : 'Windows'
+}
+
+/**
+ * The resume analogue of `prepareLaunch`, and it exists because there was not
+ * one.
+ *
+ * A resume deliberately borrows nothing from `prepareLaunch` - no model, no
+ * effort, no overlay set, no `-n`; the conversation was had under whatever it
+ * was had under - so `resume()` assembled its own argv inline. What it borrowed
+ * by omission was the path translation, and the one path a resume does carry is
+ * `--mcp-config`. A resumed WSL session therefore received
+ * `C:\Users\...\Helm\mcp\mcp-<pid>-<hex>.json`, whose backslashes the distro's
+ * shell ate before resolving the remains against the cwd; the CLI then refused
+ * to start at all, on a path nothing could have created. Measured 2026-09-03.
+ *
+ * So the translation lives beside `translatePaths` rather than at the call
+ * site, and a resume gets a target for the same reason a launch does.
+ *
+ * A path that cannot be translated **drops the flag**, exactly as every other
+ * path does. The session then resumes without Helm's tools, which is the same
+ * degradation a WSL launch already takes when the endpoint is unreachable - and
+ * strictly better than the flag reaching the CLI, which is not a session
+ * missing a feature but a session that does not start.
+ */
+export function prepareResume(req: {
+  /** The conversation id, as `history.jsonl` recorded it. */
+  sessionId: string
+  /** The ephemeral per-session MCP config, already written, Windows-spelled. */
+  mcpConfigFile?: string | null | undefined
+  /** Where the CLI runs. Omitted means Windows, as everywhere else. */
+  target?: LaunchTarget | null | undefined
+}): { argv: string[]; warnings: string[] } {
+  const target = launchTarget(req.target)
+  const warnings: string[] = []
+  const mcpConfigFile =
+    req.mcpConfigFile == null
+      ? null
+      : (translatePaths([req.mcpConfigFile], target, warnings, "Helm's own tools")[0] ?? null)
+  return { argv: buildResumeArgs(req.sessionId, mcpConfigFile), warnings }
 }

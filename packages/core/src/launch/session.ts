@@ -54,6 +54,11 @@ export function buildClaudeArgs(spec: SessionSpec): string[] {
  * one. It is not a property of the conversation being reopened - it names a
  * loopback port that only exists in this app run - so leaving it out would mean
  * a resumed session silently lacking the browser tools every other session has.
+ *
+ * That path must already be spelled the way the target's CLI will read it, the
+ * same contract `buildLaunchArgs` has. **Call `prepareResume` rather than this**
+ * unless you are the one doing the translating: this taking a Windows path
+ * straight through to a distro is the bug `prepareResume` was added for.
  */
 export function buildResumeArgs(sessionId: string, mcpConfigFile: string | null = null): string[] {
   const argv = ['--resume', sessionId]

@@ -304,6 +304,14 @@ export interface ResumedSession {
   session: SessionRecord
   /** The indexed row it came from, for the pane to caption before the TUI paints. */
   history: HistorySession
+  /**
+   * What the resume could not do but did anyway, in the same shape and for the
+   * same reason `LaunchedProfile` carries them: an unreachable endpoint in a
+   * distro, or a `--mcp-config` path with no spelling inside it. A resume can
+   * lose Helm's own tools for either, and silently losing them is what the
+   * launch path already refuses to do.
+   */
+  warnings: string[]
 }
 
 /**

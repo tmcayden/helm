@@ -30,6 +30,7 @@ export {
   buildLaunchArgs,
   launchRequestFromProfile,
   prepareLaunch,
+  prepareResume,
   type LaunchRequest
 } from './plan'
 export {
