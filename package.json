@@ -42,6 +42,7 @@
     "browser-check": "pnpm --filter @helm/desktop browser-check",
     "highlight-check": "pnpm --filter @helm/desktop highlight-check",
     "dist:win": "pnpm --filter @helm/desktop dist:win",
+    "install:local": "pnpm --filter @helm/desktop install:local",
     "verify:artifact": "pnpm --filter @helm/desktop verify:artifact",
     "db:generate": "pnpm --filter @helm/core db:generate",
     "icon": "pnpm --filter @helm/desktop icon"

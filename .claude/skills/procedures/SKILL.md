@@ -128,3 +128,35 @@ declared version.
 artefact regardless of how it was built, and `pnpm verify:artifact` unwraps a
 finished exe and checks the same thing from the outside. Full release process:
 [docs/PACKAGING.md](../../../docs/PACKAGING.md).
+
+## Installing a build on this machine
+
+Two commands, and the second has to outlive the app it replaces:
+
+```
+pnpm dist:win          # the artefacts, into packages/desktop/dist-app
+pnpm install:local     # Helm closes, the setup exe runs, Helm comes back
+```
+
+`install:local` is `scripts/install-local.ps1`, and the shape of it is the
+whole lesson. The installed Helm is usually hosting the very Claude Code session
+that asked for the reinstall, the NSIS installer cannot replace a running app,
+and a script started from a Helm tab is a child of that tab's pty - so it
+**relaunches itself detached first**, then waits a grace period so the sentence
+announcing the restart can land, asks Helm to close through its main window (so
+`before-quit` runs and the store is released), force-stops it only if that has
+not worked, runs `Helm-<version>-setup.exe /S`, and starts the installed Helm
+again. It writes each step to `%TEMP%\helm-install-local.log`.
+
+**The proof an install happened is `resources\app.asar` getting newer.** `/S`
+exits 0 on a refused install too, so the exit code says nothing; the script
+compares the asar's timestamp either side and fails loudly if it did not move.
+
+**Do not copy `dist-app\win-unpacked\` over the install directory instead.** It
+looks like it works - the app runs, the files are new - and it leaves
+`Uninstall Helm.exe` from the previous install in place, with a file list that
+no longer matches what is there. The one-click installer is per-user, needs no
+elevation and takes seconds; there is no case for going round it.
+
+This is a local install and not a release: no version bump, no changelog, no
+tag. Cutting a release is its own section above.
