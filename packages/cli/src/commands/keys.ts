@@ -1,8 +1,9 @@
 import { closeSync, openSync, readSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import type { CommandContext } from '../command.ts'
-import { print, printJson, table } from '../output.ts'
+import { print, printJson } from '../output.ts'
 import { HELM_BINDINGS } from '../snippets.ts'
+import { colours, columns, type Painters } from '../theme.ts'
 
 interface Chord {
   keys: string
@@ -19,16 +20,17 @@ export const NVIM_KEYS: readonly Chord[] = [
   { keys: '<leader>hr', description: 'repaint' }
 ]
 
-export function renderKeys(): string {
-  const rows = (chords: readonly Chord[]) => table(chords.map((c) => [`  ${c.keys}`, c.description]))
+/** Keys in text, descriptions muted, headings in accent; plain by default so the text is what the test reads. */
+export function renderKeys(paint: Painters = colours(false)): string {
+  const rows = (chords: readonly Chord[]) => columns(chords.map((c) => [`  ${paint.text(c.keys)}`, paint.muted(c.description)])).join('\n')
   return [
-    'prefix Space, then:',
+    paint.accent('prefix Space, then:'),
     rows(HELM_BINDINGS.map((b) => ({ keys: b.key, description: b.description }))),
     '',
-    'outside tmux:',
+    paint.accent('outside tmux:'),
     rows(ZSH_CHORDS),
     '',
-    'in a helm.nvim buffer:',
+    paint.accent('in a helm.nvim buffer:'),
     rows(NVIM_KEYS)
   ].join('\n')
 }
@@ -59,9 +61,10 @@ export function keys(ctx: CommandContext): Promise<number> {
     printJson({ bindings: HELM_BINDINGS, nvim: NVIM_KEYS, zsh: ZSH_CHORDS })
     return Promise.resolve(0)
   }
-  print(renderKeys())
+  const paint = colours()
+  print(renderKeys(paint))
   if (inPopup()) {
-    print('\npress any key')
+    print(`\n${paint.dim('press any key')}`)
     waitForKey()
   }
   return Promise.resolve(0)

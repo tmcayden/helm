@@ -34,6 +34,13 @@ export const COMMANDS: readonly Command[] = [
     run: async (ctx) => (await import('./commands/profile-new.ts')).profileNew(ctx)
   },
   {
+    name: 'profile show',
+    usage: 'helm profile show <name> [--harness <dir>] [--color] [--json]',
+    summary: 'one profile as a card, with its check; what the picker previews',
+    valued: ['harness'],
+    run: async (ctx) => (await import('./commands/profile.ts')).profileShow(ctx)
+  },
+  {
     name: 'profile check',
     usage: 'helm profile check <file|name> [--json]',
     summary: 'validate a profile file; what helm.nvim runs on save',

@@ -4,17 +4,31 @@ import { join } from 'node:path'
 import type { CommandContext } from '../command.ts'
 import { knownHarnesses, knownProfiles } from '../context.ts'
 import { print, warn } from '../output.ts'
-import { insideTmux, pick, tmux } from '../picker.ts'
+import { insideTmux, pick, tmux, type PickRow } from '../picker.ts'
 import type { ProfileEntry } from '../profiles.ts'
+import { colours, columns, type Painters } from '../theme.ts'
 
-export function profileRows(entries: readonly ProfileEntry[]) {
-  return entries
-    .filter((e) => e.draft !== null)
-    .map((e) => ({
-      label: `${e.name}\t${e.harness}\t${e.draft?.model ?? '-'}/${e.draft?.effort ?? '-'}`,
-      value: e
-    }))
+/** `name  model/effort  mode  prompt  overlays`, the name in text and the rest dim; the name and harness ride along hidden for the preview. */
+export function profileRows(entries: readonly ProfileEntry[], paint: Painters = colours(true)): PickRow<ProfileEntry>[] {
+  const usable = entries.filter((e) => e.draft !== null)
+  const cells = usable.map((e) => {
+    const d = e.draft
+    return [
+      e.name,
+      paint.dim(`${d?.model ?? '-'}/${d?.effort ?? '-'}`),
+      paint.dim(d?.permissionMode ?? 'default'),
+      paint.dim(d?.openingPrompt === null || d?.openingPrompt === undefined ? '-' : d.openingPrompt.length > 32 ? `${d.openingPrompt.slice(0, 31)}…` : d.openingPrompt),
+      paint.dim(`${String(d?.overlays.length ?? 0)} overlays`)
+    ]
+  })
+  return columns(cells).map((label, i) => {
+    const entry = usable[i] as ProfileEntry
+    return { label, value: entry, keys: [entry.name, entry.harness] }
+  })
 }
+
+/** The preview column: the profile card, painted although fzf's preview is a pipe. */
+export const PROFILE_PREVIEW = 'helm profile show {2} --harness {3} --color'
 
 /**
  * Meant for `tmux display-popup -E`. The popup inherits `$TMUX`, so
@@ -23,7 +37,7 @@ export function profileRows(entries: readonly ProfileEntry[]) {
  */
 export async function pickProfile(_ctx: CommandContext): Promise<number> {
   const entries = await knownProfiles()
-  const chosen = pick(profileRows(entries), 'profile')
+  const chosen = pick(profileRows(entries), { name: 'profile', hint: 'Enter new window here · Esc', preview: PROFILE_PREVIEW })
   if (chosen === null || chosen.draft === null) return 0
   const command = ['helm', 'launch', chosen.name, '--harness', chosen.harness]
   if (insideTmux()) {
@@ -36,6 +50,28 @@ export async function pickProfile(_ctx: CommandContext): Promise<number> {
     args: { positionals: [chosen.name], flags: { harness: chosen.harness }, passthrough: [] },
     json: false
   })
+}
+
+const CONVENTION_DIRS = ['skills', 'agents', 'commands'] as const
+
+/** `3 skills · 1 agent`, from one readdir per convention directory; nothing is opened. */
+export function claudeSummary(dir: string): string {
+  const parts: string[] = []
+  for (const kind of CONVENTION_DIRS) {
+    let n: number
+    try {
+      n = readdirSync(join(dir, '.claude', kind), { withFileTypes: true }).filter((d) => d.isDirectory() || d.name.endsWith('.md')).length
+    } catch {
+      continue
+    }
+    if (n > 0) parts.push(`${String(n)} ${n === 1 ? kind.slice(0, -1) : kind}`)
+  }
+  return parts.length === 0 ? 'no skills, agents or commands' : parts.join(' · ')
+}
+
+export function scopeRows(scopes: readonly Scope[], paint: Painters = colours(true)): PickRow<Scope>[] {
+  const cells = scopes.map((s) => [s.kind, s.dir, paint.dim(claudeSummary(s.dir))])
+  return columns(cells).map((label, i) => ({ label, value: scopes[i] as Scope }))
 }
 
 export interface Scope {
@@ -75,10 +111,7 @@ export function configScopes(harnesses: readonly string[], home: string = homedi
  */
 export async function pickScope(ctx: CommandContext): Promise<number> {
   const scopes = configScopes(await knownHarnesses())
-  const chosen = pick(
-    scopes.map((s) => ({ label: `${s.kind.padEnd(7)}\t${s.dir}`, value: s })),
-    'scope'
-  )
+  const chosen = pick(scopeRows(scopes), { name: 'scope', hint: 'Enter → pane with nvim on that tree · Esc' })
   if (chosen === null) return 0
   // `--view` is the helm table's `c` row: pick in the popup, then open the pane
   // from inside it, because a shell one-liner in a tmux binding cannot quote

@@ -156,6 +156,13 @@ helm.nvim buffers, so the letters are the same everywhere.
 `helm keys` and `helm.tmux` are both rendered from `HELM_BINDINGS` in
 `snippets.ts`, so the help cannot drift from the bindings.
 
+Every popup wears one look, mirrored from the owner's mockup: a rounded accent
+frame with the title in it, a dim hint line saying what Enter does, a `▸` on
+the current row over a raised cursor band, the `>` filter at the bottom, and for
+the profile picker a preview column showing the profile card that `helm
+profile show` prints. The palette lives once, in `theme.ts`, and tmux's frame
+flags, fzf's `--color` list and the commands' own text all read it from there.
+
 The cost is one keystroke per Helm action. A gesture that turns out to be
 constant may also get a direct prefix binding later without leaving the table.
 
@@ -432,6 +439,11 @@ distribution convenience for later and changes nothing above.
 - 2026-09-04: `profileToYaml` writes `target: windows` for a profile created
   on Linux; left as is and noted, because the target is the identity on this
   host and the field is core's to redesign.
+- 2026-09-04: The popups' palette is one table in `theme.ts`, handed to tmux
+  as `display-popup -b/-s/-S/-T` flags, to fzf as `--color`, and to the
+  commands as truecolour painters, because three renderers painting three
+  guesses at the same mockup drift the moment one of them changes; fzf 0.72
+  rejects `--header-first=false`, so the flag is simply not passed.
 
 ## Related
 

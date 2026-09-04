@@ -1,10 +1,23 @@
 import { spawnSync } from 'node:child_process'
 import { closeSync, openSync, readSync } from 'node:fs'
 import { CliError } from './output.ts'
+import { fzfArgs, stripAnsi } from './theme.ts'
 
 export interface PickRow<T> {
+  /** What the row shows; may carry ANSI colour, fzf runs with `--ansi`. */
   label: string
   value: T
+  /** Hidden fields a `PickLook.preview` command reaches as `{2}`, `{3}`, ... in row order. */
+  keys?: readonly string[]
+}
+
+export interface PickLook {
+  /** The word before `>` in the numbered fallback, e.g. `profile`. */
+  name: string
+  /** The dim hint line: what Enter does, then `Esc`. */
+  hint: string
+  /** A shell command fzf runs for the current row, with `{N}` naming the row's hidden keys. */
+  preview?: string
 }
 
 function hasFzf(): boolean {
@@ -16,17 +29,24 @@ function hasFzf(): boolean {
  * PATH; otherwise a numbered prompt read from the controlling tty, so it works
  * even when stdin is not the terminal. Null is a cancel, never an error.
  */
-export function pick<T>(rows: readonly PickRow<T>[], prompt: string): T | null {
+export function pick<T>(rows: readonly PickRow<T>[], look: PickLook): T | null {
   if (rows.length === 0) return null
-  if (hasFzf()) return pickWithFzf(rows, prompt)
-  return pickNumbered(rows, prompt)
+  if (hasFzf()) return pickWithFzf(rows, look)
+  return pickNumbered(rows, look.name)
 }
 
-function pickWithFzf<T>(rows: readonly PickRow<T>[], prompt: string): T | null {
+/** Each fzf line is `index \t keys... \t label`; only the label is shown and searched. */
+function pickWithFzf<T>(rows: readonly PickRow<T>[], look: PickLook): T | null {
+  const hidden = 1 + (rows[0]?.keys?.length ?? 0)
+  const field = `${String(hidden + 1)}..`
   const result = spawnSync(
     'fzf',
-    ['--prompt', `${prompt}> `, '--with-nth', '2..', '--delimiter', '\t', '--no-multi', '--layout=reverse'],
-    { input: rows.map((row, i) => `${String(i)}\t${row.label}`).join('\n'), stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf8' }
+    [...fzfArgs({ header: look.hint, preview: look.preview }), '--delimiter=\t', `--with-nth=${field}`, `--nth=${field}`],
+    {
+      input: rows.map((row, i) => [String(i), ...(row.keys ?? []), row.label].join('\t')).join('\n'),
+      stdio: ['pipe', 'pipe', 'inherit'],
+      encoding: 'utf8'
+    }
   )
   if (result.status !== 0) return null
   const index = Number.parseInt(result.stdout.split('\t')[0] ?? '', 10)
@@ -34,7 +54,7 @@ function pickWithFzf<T>(rows: readonly PickRow<T>[], prompt: string): T | null {
 }
 
 function pickNumbered<T>(rows: readonly PickRow<T>[], prompt: string): T | null {
-  const lines = rows.map((row, i) => `${String(i + 1).padStart(3)}  ${row.label}`)
+  const lines = rows.map((row, i) => `${String(i + 1).padStart(3)}  ${stripAnsi(row.label)}`)
   process.stderr.write(`${lines.join('\n')}\n${prompt} (number, empty to cancel): `)
   const answer = readTtyLine()
   if (answer === null || answer.trim() === '') return null

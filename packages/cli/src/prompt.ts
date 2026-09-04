@@ -41,5 +41,5 @@ export function pickMany<T>(rows: readonly PickRow<T>[], prompt: string): T[] {
 }
 
 export function pickOne<T>(rows: readonly PickRow<T>[], prompt: string): T | null {
-  return pick(rows, prompt)
+  return pick(rows, { name: prompt, hint: 'Enter · Esc' })
 }

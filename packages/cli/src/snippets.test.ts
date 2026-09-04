@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HELM_BINDINGS, TMUX_SNIPPET, ZSH_SNIPPET } from './snippets.ts'
+import { popupTmuxArgs } from './theme.ts'
 
 const present = (bin: string, args: string[]) => spawnSync(bin, args, { stdio: 'ignore' }).status === 0
 
@@ -48,5 +49,23 @@ describe.skipIf(!present('zsh', ['-c', 'true']))('helm.zsh', () => {
       { encoding: 'utf8' }
     )
     expect(run.stdout).toBe('[helm menu]\n')
+  })
+})
+
+describe('popup rows', () => {
+  const popups = HELM_BINDINGS.filter((b) => b.runs.startsWith('display-popup'))
+  const titles: Record<string, string> = {
+    p: 'helm launch · pick a profile',
+    h: 'helm',
+    c: 'helm config · which scope?',
+    '?': 'helm keys'
+  }
+
+  it('carry the palette frame, their title and the pane directory', () => {
+    expect(popups.map((b) => b.key)).toEqual(Object.keys(titles))
+    for (const b of popups) {
+      expect(b.runs, b.key).toContain(popupTmuxArgs(titles[b.key] as string))
+      expect(b.runs, b.key).toContain("-d '#{pane_current_path}'")
+    }
   })
 })

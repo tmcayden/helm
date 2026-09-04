@@ -5,8 +5,9 @@ import { knownHarnesses } from '../context.ts'
 import { insideTmux, pick, tmux } from '../picker.ts'
 import { PROFILES_DIR } from '../profiles.ts'
 import { print } from '../output.ts'
+import { colours, columns } from '../theme.ts'
 
-type Row = { label: string; run: () => Promise<number> }
+type Row = { key: string; label: string; description: string; run: () => Promise<number> }
 
 /** Short-lived things stay in the popup; long-lived ones get a window or pane (TERMINAL.md 5). */
 function inPopup(args: string[]): Promise<number> {
@@ -30,25 +31,31 @@ function inWindow(name: string, args: string[]): () => Promise<number> {
   }
 }
 
+/** The key letter in text, the label, then a dim description. */
+export function menuRows<R extends { key: string; label: string; description: string }>(rows: readonly R[], paint = colours(true)): { label: string; value: R }[] {
+  return columns(rows.map((r) => [paint.text(r.key), r.label, paint.dim(r.description)])).map((label, i) => ({ label, value: rows[i] as R }))
+}
+
 export async function menu(_ctx: CommandContext): Promise<number> {
   const rows: Row[] = [
-    { label: 'launch         pick a profile and start a session', run: () => inPopup(['pick', 'profile']) },
-    { label: 'new harness    create a harness from a template', run: inWindow('harness', ['harness', 'new']) },
-    { label: 'new profile    create a profile interactively', run: () => inPopup(['profile', 'new']) },
-    { label: 'edit profiles  open a harness\'s profiles in $EDITOR', run: editProfiles },
-    { label: 'history        the session index', run: thenWait(['history']) },
-    { label: 'sessions       live sessions on this machine', run: thenWait(['sessions']) },
-    { label: 'config         a .claude tree in nvim', run: viewConfig },
-    { label: 'doctor         claude doctor plus Helm\'s checks', run: thenWait(['doctor']) },
-    { label: 'keys           Helm\'s keybinds', run: () => inPopup(['keys']) }
+    { key: 'l', label: 'launch', description: 'pick a profile and start a session', run: () => inPopup(['pick', 'profile']) },
+    { key: 'n', label: 'new harness', description: 'create a harness from a template', run: inWindow('harness', ['harness', 'new']) },
+    { key: 'p', label: 'new profile', description: 'create a profile interactively', run: () => inPopup(['profile', 'new']) },
+    { key: 'e', label: 'edit profiles', description: "open a harness's profiles in $EDITOR", run: editProfiles },
+    { key: 'h', label: 'history', description: 'the session index', run: thenWait(['history']) },
+    { key: 's', label: 'sessions', description: 'live sessions on this machine', run: thenWait(['sessions']) },
+    { key: 'c', label: 'config', description: 'a .claude tree in nvim', run: viewConfig },
+    { key: 'd', label: 'doctor', description: "claude doctor plus Helm's checks", run: thenWait(['doctor']) },
+    { key: 'k', label: 'keys', description: "Helm's keybinds", run: () => inPopup(['keys']) }
   ]
-  const chosen = pick(rows.map((row) => ({ label: row.label, value: row })), 'helm')
+  const chosen = pick(menuRows(rows), { name: 'helm', hint: 'Enter · Esc' })
   return chosen === null ? 0 : chosen.run()
 }
 
 async function editProfiles(): Promise<number> {
   const harnesses = await knownHarnesses()
-  const harness = harnesses.length === 1 ? harnesses[0] : pick(harnesses.map((h) => ({ label: h, value: h })), 'harness')
+  const harness =
+    harnesses.length === 1 ? harnesses[0] : pick(harnesses.map((h) => ({ label: h, value: h })), { name: 'harness', hint: 'Enter · Esc' })
   if (harness === undefined || harness === null) return 0
   const editor = process.env['EDITOR'] ?? 'nvim'
   const dir = join(harness, PROFILES_DIR)

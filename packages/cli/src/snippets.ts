@@ -4,6 +4,8 @@
  * install refuses to overwrite one without it, because that is a file somebody
  * else wrote.
  */
+import { popupTmuxArgs } from './theme.ts'
+
 export const SNIPPET_HEADER = '# helm: written by helm install; do not edit'
 
 export interface HelmBinding {
@@ -14,7 +16,9 @@ export interface HelmBinding {
   description: string
 }
 
-const POPUP = "display-popup -E -w 80% -h 60% -d '#{pane_current_path}'"
+/** A popup in the palette's frame, titled, opened at the pane's directory. */
+const popup = (title: string, size = '-w 80% -h 60%') =>
+  `display-popup -E ${size} ${popupTmuxArgs(title)} -d '#{pane_current_path}'`
 
 /**
  * The `helm` key table. Short-lived things are popups, long-lived things are
@@ -26,12 +30,12 @@ const POPUP = "display-popup -E -w 80% -h 60% -d '#{pane_current_path}'"
  * bindings.
  */
 export const HELM_BINDINGS: readonly HelmBinding[] = [
-  { key: 'p', runs: `${POPUP} 'helm pick profile'`, description: 'pick a profile and open it in a new window' },
-  { key: 'h', runs: `${POPUP} 'helm menu'`, description: 'the Helm menu' },
+  { key: 'p', runs: `${popup('helm launch · pick a profile')} 'helm pick profile'`, description: 'pick a profile and open it in a new window' },
+  { key: 'h', runs: `${popup('helm')} 'helm menu'`, description: 'the Helm menu' },
   { key: 'e', runs: "split-window -h -c '#{pane_current_path}' 'helm view effective'", description: "effective view for this window's profile in a split" },
-  { key: 'c', runs: `${POPUP} 'helm pick scope --view'`, description: 'pick a config scope and view it in a split' },
+  { key: 'c', runs: `${popup('helm config · which scope?')} 'helm pick scope --view'`, description: 'pick a config scope and view it in a split' },
   { key: 'u', runs: "split-window -h -c '#{pane_current_path}' 'helm view config --user'", description: 'view ~/.claude in a split' },
-  { key: '?', runs: "display-popup -E -w 60% -h 50% 'helm keys'", description: 'this list' },
+  { key: '?', runs: `${popup('helm keys', '-w 60% -h 50%')} 'helm keys'`, description: 'this list' },
   { key: 'Escape', runs: 'switch-client -T root', description: 'leave the helm table' }
 ]
 
