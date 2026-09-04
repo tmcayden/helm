@@ -36,6 +36,22 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@26.2.0)(vite@8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0))
 
+  packages/cli:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
+      yaml:
+        specifier: ^2.8.2
+        version: 2.9.0
+    devDependencies:
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+
   packages/core:
     dependencies:
       '@shikijs/langs':
