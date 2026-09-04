@@ -180,6 +180,8 @@ importers:
         specifier: ^7.3.6
         version: 7.3.6(@types/node@26.2.0)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.11)(yaml@2.9.0)
 
+  packages/nvim: {}
+
   packages/ui:
     dependencies:
       clsx:

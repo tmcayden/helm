@@ -1,0 +1,10 @@
+{
+  "name": "@helm/nvim",
+  "version": "0.1.0",
+  "description": "helm.nvim: the helm:// buffers, profile diagnostics and snapshot-on-write for Neovim, painted from helm --json.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "sh tests/smoke.sh"
+  }
+}

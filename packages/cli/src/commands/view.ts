@@ -37,14 +37,18 @@ export function viewUri(words: readonly string[], user: boolean): string | null 
  * A view is a tmux pane running its own nvim (TERMINAL.md 5). The plugin
  * directory is put on the runtime path from the command line, so the view works
  * before the user has added helm.nvim to their config - and twice is harmless
- * when they have. The bundle that is running becomes the `helm` the plugin
- * calls, so a checkout that is not on PATH still paints.
+ * when they have. The `runtime` is not redundant: a config that uses lazy.nvim
+ * turns `loadplugins` off and sources only its own plugins' `plugin/` files, so
+ * a directory merely on the runtime path never gets its BufReadCmd registered,
+ * and the pane painted an empty buffer (measured 2026-09-04). The bundle that
+ * is running becomes the `helm` the plugin calls, so a checkout that is not on
+ * PATH still paints.
  */
 export async function view(ctx: CommandContext): Promise<number> {
   const uri = viewUri(ctx.args.positionals, ctx.args.flags['user'] === true)
   if (uri === null) return 0
   const profile = flagString(ctx.args.flags, 'profile')
-  const args = ['--cmd', `set rtp^=${pluginDir()}`]
+  const args = ['--cmd', `set rtp^=${pluginDir()}`, '--cmd', 'runtime plugin/helm.lua']
   if (profile !== null) args.push('--cmd', `let g:helm_profile=${JSON.stringify(profile)}`)
   args.push(uri)
   const env = { ...process.env, HELM_CLI: process.env['HELM_CLI'] ?? `${process.execPath} ${process.argv[1] ?? ''}` }
