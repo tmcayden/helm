@@ -110,13 +110,18 @@ starts, so a session that dies at once still happened.
 | `helm resume <id>` | `prepareResume`: its own argv, borrowing nothing from a profile |
 | `helm profile new / check / list` | interactive create; validate a YAML; list with usage |
 | `helm harness new / convert` | `createHarness` with a template; clone the owned repos into `repos/` |
+| `helm harness add / list` | register a harness root in the index; list the roots known |
+| `helm pick profile / scope` | the popup pickers behind the bindings (section 5); `scope --view` opens the split itself |
+| `helm menu` | the one-key menu over every picker |
 | `helm config tree <scope> / doctor` | the tree with live states; the effective chain for a profile |
-| `helm config snapshot <file>` | the snapshot-before-write, called by the editor's save hook |
-| `helm view <effective\|config\|profiles>` | runs `nvim` on the named buffer (section 6) |
+| `helm config snapshot <file>` | the snapshot-before-write, called by the editor's save hook; `--list` shows the rows |
+| `helm config restore <file> --id <n>` | put a snapshot back, refused if the file moved underneath |
+| `helm view <effective\|config\|profiles\|history>` | runs `nvim` on the named `helm://` buffer (section 6) |
 | `helm sessions` | machine-wide, from the registry, `.json` files only |
 | `helm history` | the session index, newest first, resumable rows marked |
-| `helm mcp add / list / remove` | preview the diff, then shell to `claude mcp` |
+| `helm mcp add / list / remove` | preview the diff, then shell to `claude mcp`; `list --json` redacts secrets |
 | `helm doctor` | `claude doctor` plus Helm's own checks |
+| `helm install` | write the snippets and templates, seed the store, symlink the bundle into `~/.local/bin` |
 | `helm archive` | the transcript pass, run from a timer the user owns |
 
 Every read command takes `--json`; the plugin consumes that and nothing else.
@@ -384,6 +389,45 @@ distribution convenience for later and changes nothing above.
   profile with `tmux new-window -c <root> -n <name> helm launch <name>`,
   because the popup inherits TMUX and the window lands in the session the
   key was pressed in.
+- 2026-09-04: Path-case folding for identity comparisons goes through core's
+  `pathKey`, which lowercases only on win32, because two Linux directories
+  differing in case are two directories.
+- 2026-09-04: No third launch target kind: on a Linux host the `windows`
+  target's path translation is the identity and `wsl.exe` is only reached from
+  a `\\wsl$\` root, so argv is byte-identical and nothing else changes.
+- 2026-09-04: `helm launch` sweeps stale shims on every launch, because a
+  launch is the CLI's whole process life and "swept at app start" has no other
+  moment; the sweep also removes the memory file of a provably dead session
+  only, since claude reads that file once at startup.
+- 2026-09-04: The `c` binding is a popup running `helm pick scope --view`,
+  which opens the split itself, because tmux keeps backslashes literal inside
+  single quotes and the nested `sh -c` test for the cancel case could never
+  see an empty string.
+- 2026-09-04: helm.zsh binds its chord itself through a variable-keyed
+  `tmux_chords` entry plus `bindkey`, because a quoted subscript in zsh keeps
+  its quotes and the user's `.zshrc` binds the table in a loop that has
+  already run when the snippet is sourced.
+- 2026-09-04: `helm mcp list --json` reads the three config scopes read-only
+  and redacts `env`, `headers` and bearer strings before printing, because a
+  server entry on this machine carried a token in its args and printing config
+  must not become printing a credential.
+- 2026-09-04: `helm view` passes `--cmd "runtime plugin/helm.lua"` as well as
+  the rtp prepend, because lazy.nvim turns `loadplugins` off and the rtp entry
+  alone never sourced the plugin.
+- 2026-09-04: The `helm://` buffers use filetype `helmview`, because `helm` is
+  the Helm-charts filetype and nvim-treesitter tried to install that grammar.
+- 2026-09-04: helm.nvim's snapshot autocommand is a Vimscript `throw`, not a
+  Lua `error()`, because on NVIM v0.12.2 only the former aborts the write from
+  `BufWritePre`.
+- 2026-09-04: `helm config snapshot` composes core's exported
+  `insertConfigSnapshot`/`assertWritable`/`snapshotKey` rather than adding a
+  core function, following the precedent of the desktop's `mcpAdd`, which
+  takes the row alone.
+- 2026-09-04: The bundle is made executable by the build, because
+  `helm install` symlinks it as-is.
+- 2026-09-04: `profileToYaml` writes `target: windows` for a profile created
+  on Linux; left as is and noted, because the target is the identity on this
+  host and the field is core's to redesign.
 
 ## Related
 
