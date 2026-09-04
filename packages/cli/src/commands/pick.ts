@@ -73,12 +73,20 @@ export function configScopes(harnesses: readonly string[], home: string = homedi
  * `helm view config "$(helm pick scope)"` relies on: an empty argument is "the
  * user cancelled", so `view config ""` must exit 0 quietly.
  */
-export async function pickScope(_ctx: CommandContext): Promise<number> {
+export async function pickScope(ctx: CommandContext): Promise<number> {
   const scopes = configScopes(await knownHarnesses())
   const chosen = pick(
     scopes.map((s) => ({ label: `${s.kind.padEnd(7)}\t${s.dir}`, value: s })),
     'scope'
   )
-  if (chosen !== null) print(chosen.dir)
+  if (chosen === null) return 0
+  // `--view` is the helm table's `c` row: pick in the popup, then open the pane
+  // from inside it, because a shell one-liner in a tmux binding cannot quote
+  // an empty result and an empty result is the cancel.
+  if (ctx.args.flags['view'] === true && insideTmux()) {
+    tmux(['split-window', '-h', '-c', chosen.dir, '--', 'helm', 'view', 'config', chosen.dir])
+    return 0
+  }
+  print(chosen.dir)
   return 0
 }

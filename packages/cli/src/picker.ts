@@ -43,7 +43,7 @@ function pickNumbered<T>(rows: readonly PickRow<T>[], prompt: string): T | null 
   return rows[n - 1]?.value ?? null
 }
 
-function readTtyLine(): string | null {
+export function readTtyLine(): string | null {
   let fd: number
   try {
     fd = openSync('/dev/tty', 'r')
