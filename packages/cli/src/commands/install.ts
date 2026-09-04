@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
+import { accessSync, constants, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { seedTemplates } from '@helm/core'
@@ -15,8 +15,18 @@ import { ask } from '../prompt.ts'
 
 export const defaultSymlink = (): string => join(homedir(), '.local', 'bin', 'helm')
 
-/** Creates or repoints the symlink; refuses to replace a real file. */
+const isExecutable = (file: string): boolean => {
+  try {
+    accessSync(file, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Creates or repoints the symlink; refuses to replace a real file or point at one nobody can run. */
 export function placeSymlink(link: string, target: string): 'created' | 'updated' | 'unchanged' {
+  if (!isExecutable(target)) throw new CliError(`${target} is not executable; rebuild the cli (pnpm --filter @helm/cli build) before helm install.`)
   const state = ((): 'absent' | 'link' | 'file' => {
     try {
       return lstatSync(link).isSymbolicLink() ? 'link' : 'file'

@@ -1,5 +1,5 @@
 import { build, context } from 'esbuild'
-import { readFileSync } from 'node:fs'
+import { chmodSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,4 +42,6 @@ if (process.argv.includes('--watch')) {
   await ctx.watch()
 } else {
   await build(options)
+  // `helm install` symlinks the bundle as-is and esbuild writes 0644.
+  chmodSync(join(root, 'dist/helm.mjs'), 0o755)
 }
