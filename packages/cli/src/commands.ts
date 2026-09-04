@@ -170,6 +170,12 @@ export const COMMANDS: readonly Command[] = [
   }
 ]
 
+/** A command's usage line, for the one-sentence refusal when its arguments are missing. */
+export function usageOf(name: string): string {
+  const command = COMMANDS.find((c) => c.name === name)
+  return command === undefined ? `usage: helm ${name}` : `usage: ${command.usage}`
+}
+
 /** Longest name first, so `profile list` wins over a hypothetical `profile`. */
 export function findCommand(words: readonly string[]): { command: Command; rest: string[] } | null {
   for (const take of [2, 1]) {

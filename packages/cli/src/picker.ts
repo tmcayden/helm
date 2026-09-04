@@ -86,6 +86,16 @@ export function readTtyLine(): string | null {
   return out
 }
 
+/**
+ * Holds a popup open until a key is pressed. `read` would want Enter, and the
+ * popup is `-E`, so without this the last thing a command printed is gone
+ * before anyone reads it.
+ */
+export function waitForKey(message = '[any key to close]'): void {
+  process.stderr.write(`\n${message} `)
+  spawnSync('sh', ['-c', 'stty raw -echo; dd bs=1 count=1 2>/dev/null; stty sane'], { stdio: ['inherit', 'ignore', 'ignore'] })
+}
+
 /** Whether this process is inside tmux, popup or pane alike. */
 export function insideTmux(): boolean {
   return (process.env['TMUX'] ?? '') !== ''
