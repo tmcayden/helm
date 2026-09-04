@@ -7,6 +7,7 @@ import type {
   HookBinding,
   SettingsLayerKind
 } from '../types'
+import { pathKey } from '../paths/key'
 
 /**
  * What the effective view has to say about one file in a `.claude` tree.
@@ -42,17 +43,27 @@ import type {
 /**
  * Two absolute paths naming the same file.
  *
- * Case-insensitively and separator-blind, because this compares paths that
- * arrived by different routes: the tree walk joins with the platform separator,
- * a settings file quotes whatever somebody typed, and on Windows those differ
- * in both respects for the same file.
+ * Separator-blind, and on Windows case-insensitive, because this compares paths
+ * that arrived by different routes: the tree walk joins with the platform
+ * separator, a settings file quotes whatever somebody typed, and on Windows
+ * those differ in both respects for the same file. On Linux case is a different
+ * file, so only the separators fold there.
  */
-export function samePath(a: string, b: string): boolean {
-  return normalise(a) === normalise(b)
+export function samePath(
+  a: string,
+  b: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return normalise(a, platform) === normalise(b, platform)
 }
 
-function normalise(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+function normalise(path: string, platform: NodeJS.Platform): string {
+  return pathKey(path.replace(/\\/g, '/').replace(/\/+$/, ''), platform)
+}
+
+/** A relative path folded for textual matching against a known file name. */
+function fold(path: string): string {
+  return normalise(path, 'win32')
 }
 
 /**
@@ -66,7 +77,7 @@ function normalise(path: string): string {
  */
 function mentions(value: string, file: ConfigFile): boolean {
   const haystack = value.replace(/\\\\/g, '/').replace(/\\/g, '/').toLowerCase()
-  const rel = normalise(file.relPath)
+  const rel = fold(file.relPath)
   if (rel !== '' && haystack.includes(rel)) return true
   const name = rel.split('/').at(-1) ?? ''
   if (name === '') return false
@@ -111,7 +122,7 @@ const CLI_FILES: ReadonlyArray<{ rel: string; summary: string; redacted?: boolea
 ]
 
 function cliFile(file: ConfigFile): (typeof CLI_FILES)[number] | null {
-  const rel = normalise(file.relPath)
+  const rel = fold(file.relPath)
   return CLI_FILES.find((known) => known.rel.toLowerCase() === rel) ?? null
 }
 
@@ -125,7 +136,7 @@ function cliFile(file: ConfigFile): (typeof CLI_FILES)[number] | null {
  * Helm is otherwise right to open.
  */
 export function isRedactedConfigFile(relPath: string): boolean {
-  const rel = normalise(relPath)
+  const rel = fold(relPath)
   return CLI_FILES.some((known) => known.redacted === true && known.rel.toLowerCase() === rel)
 }
 

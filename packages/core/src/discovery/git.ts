@@ -60,6 +60,8 @@ export function repoCommand(
   cwd: string,
   program: string
 ): { file: string; prefix: string[]; cwd?: string } {
+  // Only a `\\wsl$\` UNC selects `wsl.exe`, so on a Linux host - where every
+  // cwd is a posix path - this is always the program itself.
   const distro = wslDistroOf(cwd)
   if (distro === null) return { file: program, prefix: [], cwd }
   const inside = toWslPath(cwd, { distro })

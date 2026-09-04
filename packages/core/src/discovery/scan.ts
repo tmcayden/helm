@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve } from 'node:path'
 import { join } from 'node:path'
+import { pathKey } from '../paths/key'
 import { parse as parseYaml } from 'yaml'
 import type { DiscoveryResult, Harness, Project } from '../types'
 import { hasClaudeDir, readClaudeInventory } from './claude-inventory'
@@ -232,7 +233,7 @@ export async function scan(opts: ScanOptions): Promise<DiscoveryResult> {
 
   const addProjects = (found: Project[]): void => {
     for (const project of found) {
-      const key = project.path.toLowerCase()
+      const key = pathKey(project.path)
       if (seen.has(key)) continue
       seen.add(key)
       projects.push(project)
@@ -374,10 +375,10 @@ export function disprovedProjectPaths(
   )
   if (trusted.length === 0) return []
 
-  const found = new Set(result.projects.map((project) => project.path.toLowerCase()))
+  const found = new Set(result.projects.map((project) => pathKey(project.path)))
   return cached.filter(
     (path) =>
-      !found.has(path.toLowerCase()) && trusted.some((root) => isWithin(root, path))
+      !found.has(pathKey(path)) && trusted.some((root) => isWithin(root, path))
   )
 }
 

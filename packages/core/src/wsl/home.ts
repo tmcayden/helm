@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { win32 } from 'node:path'
 import type { WslHome } from '../types'
 import { isLinuxPath, toWindowsPath, wslDistroOf } from './path'
 
@@ -29,12 +29,18 @@ import { isLinuxPath, toWindowsPath, wslDistroOf } from './path'
  * never read.
  */
 
-/** `~/.claude` inside a distro, as a path this process can open, or null. */
+/**
+ * `~/.claude` inside a distro, as a path this process can open, or null.
+ *
+ * Joined with `win32` explicitly: what comes back is a Windows path whichever
+ * host built it, so a Linux process reasoning about a distro's tree spells it
+ * the same way the Windows app does.
+ */
 export function wslClaudeHome(distro: string, linuxHome: string): string | null {
   const home = linuxHome.trim()
   if (distro.trim() === '' || home === '' || !home.startsWith('/')) return null
   const windows = toWindowsPath(home, { distro })
-  return windows === null ? null : join(windows, '.claude')
+  return windows === null ? null : win32.join(windows, '.claude')
 }
 
 /** The `WslHome` for a probe that found a home, or null for one that did not. */

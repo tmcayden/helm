@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm'
+import { pathKey } from '../paths/key'
 import type { ClaudeInventory, GitState, Harness, Project, ProjectKind } from '../types'
 import { EMPTY_INVENTORY } from '../types'
 import type { Store } from './db'
@@ -23,10 +24,10 @@ import { projects } from './schema'
 export function cacheProjects(store: Store, found: Project[], harnesses: readonly Harness[]): void {
   const seenAt = new Date().toISOString()
   const templates = new Map(
-    harnesses.map((harness) => [harness.path.toLowerCase(), harness.template])
+    harnesses.map((harness) => [pathKey(harness.path), harness.template])
   )
   const templateOf = (project: Project): string | null =>
-    project.kind === 'harness' ? (templates.get(project.path.toLowerCase()) ?? null) : null
+    project.kind === 'harness' ? (templates.get(pathKey(project.path)) ?? null) : null
 
   const write = store.raw.transaction(() => {
     for (const project of found) {
@@ -74,13 +75,13 @@ export function cacheProjects(store: Store, found: Project[], harnesses: readonl
  */
 export function forgetProjects(store: Store, paths: readonly string[]): number {
   if (paths.length === 0) return 0
-  const wanted = new Set(paths.map((path) => path.toLowerCase()))
+  const wanted = new Set(paths.map((path) => pathKey(path)))
   const doomed = store.db
     .select({ path: projects.path })
     .from(projects)
     .all()
     .map((row) => row.path)
-    .filter((path) => wanted.has(path.toLowerCase()))
+    .filter((path) => wanted.has(pathKey(path)))
   if (doomed.length === 0) return 0
 
   const remove = store.raw.transaction(() => {

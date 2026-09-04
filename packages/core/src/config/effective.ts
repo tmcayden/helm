@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, join, resolve, win32 } from 'node:path'
+import { pathKey } from '../paths/key'
 import { claudeHome } from '../discovery/history'
 import { overlayPluginNames } from '../launch/overlay'
 import type {
@@ -263,8 +264,10 @@ function transportOf(config: unknown): string {
  * console reported "no servers configured" for a directory whose session had
  * one loaded.
  *
- * Both separators are folded and the comparison is case-insensitive, because
- * these are Windows paths. Where a directory really is present twice, the entry
+ * Both separators are folded and, on Windows, the comparison is
+ * case-insensitive, because there these are Windows paths - and the platform is
+ * a parameter so that branch is tested from any host. Where a directory really
+ * is present twice, the entry
  * that actually defines servers is the one returned - two entries are one
  * directory, and picking whichever came first in the file would answer "no
  * servers" for a directory that has them.
@@ -273,11 +276,18 @@ function transportOf(config: unknown): string {
  * `~/.claude.json` wherever `computeEffectiveView` is called, so this is the
  * only level at which the key-shape rule can be stated hermetically.
  */
-export function projectEntry(projects: unknown, cwd: string): Record<string, unknown> | undefined {
+export function projectEntry(
+  projects: unknown,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform
+): Record<string, unknown> | undefined {
   if (projects === null || typeof projects !== 'object' || Array.isArray(projects)) return undefined
+  const windows = platform === 'win32'
   const fold = (path: string): string =>
-    path.replace(/[\\/]+/g, '\\').replace(/\\$/, '').toLowerCase()
-  const wanted = fold(resolve(cwd))
+    windows
+      ? pathKey(path.replace(/[\\/]+/g, '\\').replace(/\\$/, ''), platform)
+      : path.replace(/\/+$/, '')
+  const wanted = fold(windows ? win32.resolve(cwd) : resolve(cwd))
 
   let fallback: Record<string, unknown> | undefined
   for (const [name, value] of Object.entries(projects as Record<string, unknown>)) {

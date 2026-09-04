@@ -1,4 +1,5 @@
 import { isAbsolute } from 'node:path'
+import { pathKey } from '../paths/key'
 import { sql } from 'drizzle-orm'
 import {
   BROWSER_PROJECT_URLS_MAX,
@@ -171,7 +172,7 @@ export const SETTING_VALIDATORS: SettingValidators = {
         return `expected every pin to be a path, got ${describe(entry)}`
       }
       if (!isAbsolute(entry)) return `expected an absolute path, got ${JSON.stringify(entry)}`
-      const key = entry.toLowerCase()
+      const key = pathKey(entry)
       if (seen.has(key)) return `expected each project once, got ${JSON.stringify(entry)} twice`
       seen.add(key)
     }

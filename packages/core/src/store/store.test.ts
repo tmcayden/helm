@@ -232,15 +232,17 @@ describe('settings validation', () => {
       // rejection and it is the same shape as `prIgnoredRepos`': the comparison
       // is case-insensitive, so `C:\Repos\Api` and `c:\repos\api` would present
       // as two rows in a section where un-pinning either removes both. Mixed
-      // case across *different* paths is fine and is in the good column.
+      // case across *different* paths is fine and is in the good column - and
+      // on Linux, where case is a different directory, so is the re-cased pair.
       good: [
         [],
         [join(tmpdir(), 'alpha')],
         [join(tmpdir(), 'alpha'), join(tmpdir(), 'Beta')],
-        [join(tmpdir(), 'a folder with spaces')]
+        [join(tmpdir(), 'a folder with spaces')],
+        ...(process.platform === 'win32' ? [] : [[join(tmpdir(), 'alpha'), join(tmpdir(), 'ALPHA')]])
       ],
       bad: [
-        [join(tmpdir(), 'alpha'), join(tmpdir(), 'ALPHA')],
+        ...(process.platform === 'win32' ? [[join(tmpdir(), 'alpha'), join(tmpdir(), 'ALPHA')]] : []),
         [join(tmpdir(), 'alpha'), join(tmpdir(), 'alpha')],
         ['repos/helm'],
         ['../up'],
@@ -765,8 +767,14 @@ describe('pinned projects', () => {
   it('produces a list the validator accepts', () => {
     // The toggle and the validator have to agree about what a set is: a helper
     // that could produce two spellings would build a value nothing can write.
+    // Absolute on the host running the suite, since the validator asks the
+    // host's `path`; the toggle's fold is a Windows one, so on Linux the second
+    // spelling is a distinct directory and the set grows.
+    const win = process.platform === 'win32'
+    const api = win ? a : '/repos/Api'
+    const web = win ? b : '/repos/web'
     let held: string[] = []
-    for (const path of [a, b, 'c:\\repos\\api', 'C:\\Repos\\WEB']) {
+    for (const path of [api, web, api.toLowerCase(), web.toUpperCase()]) {
       held = withProjectPinned(held, path, true)
       expect(validateSetting('pinnedProjects', held)).toBeNull()
     }
@@ -828,7 +836,9 @@ describe('project cache', () => {
     const beta = join(dir, 'repos', 'beta')
     cacheProjects(store, [project(), project({ path: beta, name: 'beta' })], [])
 
-    expect(forgetProjects(store, [alpha.toUpperCase()])).toBe(1)
+    // Another spelling of the same directory on Windows; on Linux that would be
+    // a directory nothing cached, so the row is named the way it was written.
+    expect(forgetProjects(store, [process.platform === 'win32' ? alpha.toUpperCase() : alpha])).toBe(1)
     expect(readCachedProjects(store).map((p) => p.path)).toEqual([beta])
     // Idempotent, because the caller works out what to forget from a list that
     // may already have been reconciled by the scan that preceded it.

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, resolve, win32 } from 'node:path'
 import type {
   EffortLevel,
   LaunchPlan,
@@ -320,8 +320,10 @@ export function prepareLaunch(req: LaunchRequest): LaunchPlan {
    * is a real contradiction rather than an unset field, and silently going with
    * the path would hide a profile somebody has to fix.
    */
-  const cwd = resolve(req.root)
-  const resident = wslDistroOf(cwd)
+  // A `\\wsl$\` root is a Windows path whatever host is planning, so it is
+  // resolved as one; a posix `resolve` would prepend the working directory.
+  const resident = wslDistroOf(req.root)
+  const cwd = resident === null ? resolve(req.root) : win32.resolve(req.root)
   const chosen = launchTarget(req.target)
   let target = chosen
   if (resident !== null) {

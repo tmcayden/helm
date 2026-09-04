@@ -1,5 +1,6 @@
 import { basename, sep } from 'node:path'
 import { samePath } from '../config/live'
+import { pathKey } from '../paths/key'
 import { recordTranscript, scanProjectDir, scanTranscripts, type TranscriptFile } from './history'
 
 /**
@@ -41,7 +42,7 @@ export function createLiveTranscripts(
   let held: Map<string, TranscriptFile> | null = null
 
   const under = (file: string, dir: string): boolean =>
-    file.toLowerCase().startsWith(`${dir.toLowerCase().replace(/[\\/]+$/, '')}${sep}`)
+    pathKey(file).startsWith(`${pathKey(dir.replace(/[\\/]+$/, ''))}${sep}`)
 
   const forgetUnder = (found: Map<string, TranscriptFile>, dir: string): void => {
     for (const [id, entry] of found) if (under(entry.file, dir)) found.delete(id)

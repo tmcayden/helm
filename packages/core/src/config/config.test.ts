@@ -348,42 +348,44 @@ describe('computeEffectiveView', () => {
  * had one loaded.
  */
 describe('projectEntry', () => {
+  // Every document here is a Windows CLI's, so the Windows key rule is asked for
+  // by name rather than left to whichever host runs the suite.
   const servers = { mcpServers: { clickup: { command: 'npx' } } }
 
   it('finds an entry the CLI wrote with forward slashes', () => {
     const doc = { 'C:/Users/x/repos/helm': servers }
-    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm')).toEqual(servers)
+    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm', 'win32')).toEqual(servers)
   })
 
   it('finds an entry the CLI wrote with backslashes', () => {
     const doc = { 'C:\\Users\\x\\repos\\helm': servers }
-    expect(projectEntry(doc, 'C:/Users/x/repos/helm')).toEqual(servers)
+    expect(projectEntry(doc, 'C:/Users/x/repos/helm', 'win32')).toEqual(servers)
   })
 
   it('matches case-insensitively, because these are Windows paths', () => {
     const doc = { 'c:/users/X/Repos/Helm': servers }
-    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm')).toEqual(servers)
+    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm', 'win32')).toEqual(servers)
   })
 
   it('prefers the duplicate that actually defines servers', () => {
     const doc = { 'C:\\Users\\x': { history: [] }, 'C:/Users/x': servers }
-    expect(projectEntry(doc, 'C:\\Users\\x')).toEqual(servers)
+    expect(projectEntry(doc, 'C:\\Users\\x', 'win32')).toEqual(servers)
   })
 
   it('still answers with a matching entry that defines none', () => {
     const doc = { 'C:/Users/x': { history: [] } }
-    expect(projectEntry(doc, 'C:\\Users\\x')).toEqual({ history: [] })
+    expect(projectEntry(doc, 'C:\\Users\\x', 'win32')).toEqual({ history: [] })
   })
 
   it('does not match a different directory, or a prefix of one', () => {
     const doc = { 'C:/Users/x/repos/helmet': servers, 'C:/Users/x/repos': servers }
-    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm')).toBeUndefined()
+    expect(projectEntry(doc, 'C:\\Users\\x\\repos\\helm', 'win32')).toBeUndefined()
   })
 
   it('tolerates a document with no projects at all', () => {
-    expect(projectEntry(undefined, 'C:\\Users\\x')).toBeUndefined()
-    expect(projectEntry(null, 'C:\\Users\\x')).toBeUndefined()
-    expect(projectEntry([], 'C:\\Users\\x')).toBeUndefined()
+    expect(projectEntry(undefined, 'C:\\Users\\x', 'win32')).toBeUndefined()
+    expect(projectEntry(null, 'C:\\Users\\x', 'win32')).toBeUndefined()
+    expect(projectEntry([], 'C:\\Users\\x', 'win32')).toBeUndefined()
   })
 })
 

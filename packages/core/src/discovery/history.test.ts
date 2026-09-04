@@ -8,6 +8,7 @@ import {
   historyFileIn,
   projectsDirIn,
   readHistoryTail,
+  recordTranscript,
   scanTranscripts
 } from './history'
 
@@ -136,9 +137,11 @@ describe('readHistoryTail', () => {
 })
 
 describe('scanTranscripts', () => {
-  const transcript = (projectDir: string, id: string, body = '{}\n'): void => {
+  const transcript = (projectDir: string, id: string, body = '{}\n'): string => {
     mkdirSync(join(projectsDir, projectDir), { recursive: true })
-    writeFileSync(join(projectsDir, projectDir, `${id}.jsonl`), body)
+    const file = join(projectsDir, projectDir, `${id}.jsonl`)
+    writeFileSync(file, body)
+    return file
   }
 
   it('finds transcripts across every project directory', () => {
@@ -181,10 +184,20 @@ describe('scanTranscripts', () => {
 
   it('keeps the larger file when one id appears under two directories', () => {
     transcript('C--repos-alpha', uuid(1), '{}\n')
-    transcript('C--repos-Alpha', uuid(1), '{"a":1}\n{"b":2}\n')
+    transcript('C--repos-beta', uuid(1), '{"a":1}\n{"b":2}\n')
 
     const found = scanTranscripts(projectsDir)
     expect(found.get(uuid(1))?.bytes).toBe(Buffer.byteLength('{"a":1}\n{"b":2}\n'))
+  })
+
+  it('re-records a file it is seeing again rather than treating it as a rival', () => {
+    // Two spellings of one directory are one file on Windows and two on Linux;
+    // either way the same path seen twice is a re-read, never a smaller rival.
+    const first = transcript('C--repos-alpha', uuid(1), '{"a":1}\n{"b":2}\n')
+    const found = scanTranscripts(projectsDir)
+    writeFileSync(first, '{}\n')
+    expect(recordTranscript(first, found)).toBe(true)
+    expect(found.get(uuid(1))?.bytes).toBe(Buffer.byteLength('{}\n'))
   })
 
   it('returns nothing when there is no projects directory', () => {

@@ -518,28 +518,33 @@ describe('search', () => {
 })
 
 describe('assertContentWritable', () => {
+  // Pure path arithmetic over the host's own `path`, so the scope is spelled the
+  // way this host spells an absolute path.
+  const V = process.platform === 'win32' ? 'C:/v' : '/v'
+  const OTHER = process.platform === 'win32' ? 'C:/other' : '/other'
+
   it('refuses a path outside the scope', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/other/notes/a.md')).toThrow(/not inside/)
+    expect(() => assertContentWritable(`${V}`, `${OTHER}/notes/a.md`)).toThrow(/not inside/)
   })
 
   it('refuses a nested repository', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/v/repos/x/notes/a.md')).toThrow(/not content/)
+    expect(() => assertContentWritable(`${V}`, `${V}/repos/x/notes/a.md`)).toThrow(/not content/)
   })
 
   it('refuses a file it cannot read as content', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/v/notes/a.exe')).toThrow(/binary/)
+    expect(() => assertContentWritable(`${V}`, `${V}/notes/a.exe`)).toThrow(/binary/)
   })
 
   it('allows a script, which is a file the agent wrote', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/v/tools/rebuild.py')).not.toThrow()
+    expect(() => assertContentWritable(`${V}`, `${V}/tools/rebuild.py`)).not.toThrow()
   })
 
   it('allows an extensionless file, which is text until the bytes say otherwise', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/v/LICENSE')).not.toThrow()
+    expect(() => assertContentWritable(`${V}`, `${V}/LICENSE`)).not.toThrow()
   })
 
   it('allows a note and a skill', () => {
-    expect(() => assertContentWritable('C:/v', 'C:/v/notes/a.md')).not.toThrow()
-    expect(() => assertContentWritable('C:/v', 'C:/v/.claude/skills/x/SKILL.md')).not.toThrow()
+    expect(() => assertContentWritable(`${V}`, `${V}/notes/a.md`)).not.toThrow()
+    expect(() => assertContentWritable(`${V}`, `${V}/.claude/skills/x/SKILL.md`)).not.toThrow()
   })
 })

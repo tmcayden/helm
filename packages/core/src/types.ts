@@ -1268,7 +1268,15 @@ export interface Profile {
   updatedAt: string
 }
 
-/** A profile's target, with the pre-target default applied. */
+/**
+ * A profile's target, with the pre-target default applied.
+ *
+ * `windows` is also the right answer on a Linux host, and no third kind is
+ * needed: for that kind `translatePaths` is the identity, so a `/home/...` root
+ * reaches the argv untouched, and `wsl.exe` is only ever chosen off a `\\wsl$\`
+ * UNC (`wslDistroOf`), which no Linux path is. "Windows" here means "this
+ * machine, no translation", and the name is kept because it is a stored value.
+ */
 export function launchTarget(target: LaunchTarget | null | undefined): LaunchTarget {
   return target ?? WINDOWS_TARGET
 }

@@ -320,9 +320,12 @@ describe('reconciling the discovery cache', () => {
   it('matches roots and rows across two spellings of one directory', () => {
     const cached = [join(root, 'Tool', 'SRC')]
     const tool = join(root, 'tool')
-    expect(disprovedProjectPaths(cached, scanned([tool], [tool]))).toEqual([
-      join(root, 'Tool', 'SRC')
-    ])
+    // On Windows `Tool/SRC` is under the `tool` root and the scan did not find
+    // it, so it is disproved. On Linux it is a different directory under no
+    // trusted root, and a row nothing looked at cannot be disproved.
+    expect(disprovedProjectPaths(cached, scanned([tool], [tool]))).toEqual(
+      process.platform === 'win32' ? [join(root, 'Tool', 'SRC')] : []
+    )
     expect(disprovedProjectPaths(cached, scanned([tool], [join(root, 'tool', 'src')]))).toEqual([])
   })
 

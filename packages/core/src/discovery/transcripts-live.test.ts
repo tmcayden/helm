@@ -165,12 +165,14 @@ describe('createLiveTranscripts', () => {
     expect(live.all().has(uuid(14))).toBe(true)
   })
 
-  it('compares paths case-insensitively, as the filesystem does', () => {
+  it('compares paths the way the filesystem does', () => {
+    // Case-insensitively on Windows, where the upper-cased spelling is this
+    // file; exactly on Linux, where it names a file that was never held.
     const file = transcript('alpha', 15)
     const live = createLiveTranscripts(projects)
     live.all()
     rmSync(file)
     live.apply('removed', file.toUpperCase(), false)
-    expect(live.all().has(uuid(15))).toBe(false)
+    expect(live.all().has(uuid(15))).toBe(process.platform !== 'win32')
   })
 })
