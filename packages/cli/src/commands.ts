@@ -1,4 +1,4 @@
-import { notImplemented, type Command } from './command.ts'
+import type { Command } from './command.ts'
 
 /**
  * The whole command surface, as a table (TERMINAL.md 4). Adding a command is
@@ -26,8 +26,19 @@ export const COMMANDS: readonly Command[] = [
     summary: 'every profile across known harnesses, with problems and usage',
     run: async (ctx) => (await import('./commands/profile.ts')).profileList(ctx)
   },
-  notImplemented('profile new', 'helm profile new', 'create a profile interactively'),
-  notImplemented('profile check', 'helm profile check <file>', 'validate a profile file'),
+  {
+    name: 'profile new',
+    usage: 'helm profile new [--harness <dir>] [--name n] [--overlays a,b] [--model m] [--effort e] [--permission-mode p] [--opening-prompt t] [--yes] [--force] [--json]',
+    summary: 'create a profile, prompting for what the flags leave out',
+    valued: ['harness', 'name', 'overlays', 'model', 'effort', 'permission-mode', 'opening-prompt'],
+    run: async (ctx) => (await import('./commands/profile-new.ts')).profileNew(ctx)
+  },
+  {
+    name: 'profile check',
+    usage: 'helm profile check <file|name> [--json]',
+    summary: 'validate a profile file; what helm.nvim runs on save',
+    run: async (ctx) => (await import('./commands/profile-check.ts')).profileCheck(ctx)
+  },
   {
     name: 'harness add',
     usage: 'helm harness add <dir>',
@@ -40,8 +51,20 @@ export const COMMANDS: readonly Command[] = [
     summary: 'the registered harnesses, plus the one enclosing the cwd',
     run: async (ctx) => (await import('./commands/harness.ts')).harnessList(ctx)
   },
-  notImplemented('harness new', 'helm harness new <dir> [--template <name>]', 'create a harness from a template'),
-  notImplemented('harness convert', 'helm harness convert <dir>', 'make a harness of a directory holding repositories'),
+  {
+    name: 'harness new',
+    usage: 'helm harness new <dir> [--template <name>] [--name <n>] [--json]',
+    summary: 'create a harness from a template and register it',
+    valued: ['template', 'name'],
+    run: async (ctx) => (await import('./commands/harness-new.ts')).harnessNew(ctx)
+  },
+  {
+    name: 'harness convert',
+    usage: 'helm harness convert <dir> [--name <n>] [--json]',
+    summary: 'make a harness of a directory holding repositories',
+    valued: ['name'],
+    run: async (ctx) => (await import('./commands/harness-new.ts')).harnessConvert(ctx)
+  },
   {
     name: 'history',
     usage: 'helm history [--limit N] [--json]',
@@ -73,14 +96,65 @@ export const COMMANDS: readonly Command[] = [
     summary: 'the Helm menu, for a tmux popup',
     run: async (ctx) => (await import('./commands/menu.ts')).menu(ctx)
   },
-  notImplemented('config tree', 'helm config tree <scope> [--json]', 'a .claude tree with live states'),
-  notImplemented('config doctor', 'helm config doctor <profile> [--json]', 'the effective chain for a profile'),
-  notImplemented('config snapshot', 'helm config snapshot <file>', 'snapshot a config file before an editor writes it'),
-  notImplemented('view', 'helm view <effective|config|profiles> [scope]', 'run nvim on the named buffer'),
-  notImplemented('doctor', 'helm doctor [--json]', 'claude doctor plus Helm\'s own checks'),
-  notImplemented('install', 'helm install [--yes]', 'write the tmux and zsh snippets, seed templates'),
-  notImplemented('mcp', 'helm mcp <add|list|remove>', 'preview, then shell to claude mcp'),
-  notImplemented('archive', 'helm archive', 'the transcript pass')
+  {
+    name: 'config tree',
+    usage: 'helm config tree <scope dir | --user> [--json]',
+    summary: 'a .claude tree with live states',
+    run: async (ctx) => (await import('./commands/config.ts')).configTree(ctx)
+  },
+  {
+    name: 'config doctor',
+    usage: 'helm config doctor [--profile <name>] [--json]',
+    summary: 'the effective chain for a profile',
+    valued: ['profile'],
+    run: async (ctx) => (await import('./commands/config.ts')).configDoctor(ctx)
+  },
+  {
+    name: 'config snapshot',
+    usage: 'helm config snapshot <file> [--list] [--json]',
+    summary: 'snapshot a config file before an editor writes it',
+    run: async (ctx) => (await import('./commands/config.ts')).configSnapshot(ctx)
+  },
+  {
+    name: 'config restore',
+    usage: 'helm config restore <file> --id <n> [--json]',
+    summary: 'put a snapshot back, snapshotting what is there first',
+    valued: ['id'],
+    run: async (ctx) => (await import('./commands/config.ts')).configRestore(ctx)
+  },
+  {
+    name: 'view',
+    usage: 'helm view <effective | config <dir> | config --user | profiles | history> [--profile <name>]',
+    summary: 'run nvim on the named helm:// buffer',
+    valued: ['profile'],
+    run: async (ctx) => (await import('./commands/view.ts')).view(ctx)
+  },
+  {
+    name: 'doctor',
+    usage: 'helm doctor [--claude] [--json]',
+    summary: 'Helm\'s own checks; --claude runs claude doctor too',
+    run: async (ctx) => (await import('./commands/doctor.ts')).doctor(ctx)
+  },
+  {
+    name: 'install',
+    usage: 'helm install [--yes] [--no-dotfiles] [--symlink <path>] [--no-symlink] [--json]',
+    summary: 'write the tmux and zsh snippets, seed templates, offer the dotfile lines',
+    valued: ['symlink'],
+    run: async (ctx) => (await import('./commands/install.ts')).install(ctx)
+  },
+  {
+    name: 'mcp',
+    usage: 'helm mcp list [--json] | add <name> <json> [--scope s] | remove <name> [--scope s]',
+    summary: 'preview the change, then shell to claude mcp',
+    valued: ['scope'],
+    run: async (ctx) => (await import('./commands/mcp.ts')).mcp(ctx)
+  },
+  {
+    name: 'archive',
+    usage: 'helm archive [--json]',
+    summary: 'one transcript archive pass; run it from a timer you own',
+    run: async (ctx) => (await import('./commands/archive.ts')).archive(ctx)
+  }
 ]
 
 /** Longest name first, so `profile list` wins over a hypothetical `profile`. */
