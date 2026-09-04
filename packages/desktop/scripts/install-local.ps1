@@ -49,8 +49,11 @@ $installDir = Join-Path $env:LOCALAPPDATA 'Programs\Helm'
 $installedExe = Join-Path $installDir 'Helm.exe'
 $asar = Join-Path $installDir 'resources\app.asar'
 
-function Say($msg) { "$(Get-Date -Format 'HH:mm:ss')  $msg" | Tee-Object -FilePath $Log -Append | Out-Null }
-"" | Out-File $Log
+# Add-Content with an explicit encoding: Tee-Object in PowerShell 5.1 writes
+# UTF-16, which every other tool on the machine then prints as spaced-out
+# characters. Measured on the first run of this script.
+function Say($msg) { Add-Content -Path $Log -Value "$(Get-Date -Format 'HH:mm:ss')  $msg" -Encoding utf8 }
+Set-Content -Path $Log -Value '' -Encoding utf8
 Say "install-local: repo $repo"
 
 $version = (Get-Content (Join-Path $desktop 'package.json') | ConvertFrom-Json).version
