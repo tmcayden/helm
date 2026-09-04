@@ -4,13 +4,18 @@ export {
   claudeHome,
   directoryExists,
   historyFileIn,
+  isTranscriptName,
   projectsDirIn,
   readHistoryTail,
+  recordTranscript,
+  scanProjectDir,
   scanTranscripts,
   type HistoryLine,
   type HistoryTail,
   type TranscriptFile
 } from './history'
+export { createExistenceCache, type ExistenceCache, type ExistenceCacheDeps } from './existence'
+export { createLiveTranscripts, type LiveTranscripts } from './transcripts-live'
 export {
   countTopLevelFolders,
   createHarness,

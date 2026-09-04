@@ -50,6 +50,7 @@ import type { SessionToolsWorld } from './session-tools'
 import { runBrowserChecks } from './browsercheck'
 import { createArchiveService } from './archive'
 import { createHistoryService } from './history'
+import { watchWslClaudeTree } from './wslwatch'
 import { createPullsService } from './pulls'
 import { createUsageService } from './usage'
 import { wslHomes } from './wsl'
@@ -490,7 +491,10 @@ function startApp(options: AppOptions = {}): void {
     store: services.store,
     home: options.claudeHome,
     onTranscripts: (transcripts) => archive.consume(transcripts),
-    onChange: (summary) => emit(win, 'history:changed', summary)
+    onChange: (summary) => emit(win, 'history:changed', summary),
+    // Only ever reached through `useHomes`, which the `--claude-home` gate
+    // below never calls - so a check pointed at a fixture spawns nothing.
+    watchDistro: watchWslClaudeTree
   })
 
   const usage = createUsageService({

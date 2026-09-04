@@ -2,7 +2,8 @@ import { watch, statSync, type FSWatcher } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import {
   claudeHome,
-  directoryExists,
+  createExistenceCache,
+  createLiveTranscripts,
   historyCursor,
   historyFileIn,
   indexHistory,
@@ -11,28 +12,39 @@ import {
   resolveRecordedPath,
   scanTranscripts,
   type HistorySummary,
+  type LiveTranscripts,
   type Store,
   type TranscriptFile,
   type WslHome
 } from '@helm/core'
+import type { WslTreeWatch, WslTreeWatchHandlers } from './wslwatch'
 
 /**
  * Keeping the session index level with a file Helm does not own.
  *
  * `history.jsonl` is written by every `claude` on the machine, including the
  * ones started from a terminal while Helm is open - so the launcher is only
- * honest if it notices those. Two mechanisms, because they fail differently:
+ * honest if it notices those. Three mechanisms, because they fail differently:
  *
  *   `fs.watch` on the containing directory fires within milliseconds, and is
  *   documented as not available everywhere. The directory rather than the file
  *   so that a rotation - the file being replaced rather than appended to -
  *   still reports, which a watch on the inode does not.
  *
- *   A stat poll every few seconds costs one syscall and covers the case where
- *   the watch never fires at all.
+ *   A distribution's tree gets no `fs.watch` - the 9P share throws `EISDIR` -
+ *   so it is watched from **inside** the distribution instead, by an
+ *   `inotifywait` whose stdout this process reads (`wslwatch.ts`, and
+ *   `core/wsl/inotify.ts` for why). That stream names one path per event,
+ *   which is what lets the distro's transcript map be kept level by events
+ *   rather than re-walked: the walk over 9P was the 777-873 ms main-thread
+ *   stall this file used to cause once a minute.
  *
- * Both funnel into the same debounced refresh, which is incremental: only the
- * bytes appended since the last pass are read.
+ *   A stat poll every few seconds costs one syscall and covers the case where
+ *   no watch fires at all - a home whose distro has no `inotifywait`, or one
+ *   whose watcher is between deaths.
+ *
+ * All three funnel into the same debounced refresh, which is incremental: only
+ * the bytes appended since the last pass are read.
  */
 
 /** Long enough for a burst of appends to settle, short enough to feel immediate. */
@@ -94,13 +106,29 @@ export interface HistoryServiceDeps {
   onTranscripts?: ((transcripts: Map<string, TranscriptFile>) => void) | undefined
   /** Overridden by `--history-check` to index a fixture instead of the real tree. */
   home?: string | undefined
+  /**
+   * How a distribution's tree is watched from inside it. Absent, every distro
+   * is left to the poll - which is what a check pointed at a fixture wants,
+   * though none of those ever calls `useHomes` in the first place.
+   */
+  watchDistro?: ((home: WslHome, handlers: WslTreeWatchHandlers) => WslTreeWatch) | undefined
+}
+
+/** One distribution's `~/.claude` as this index holds it. */
+interface DistroIndex {
+  home: WslHome
+  /** Its transcript map, kept level by the watcher's events while `watch` is live. */
+  transcripts: LiveTranscripts
+  /** Null until started, and again once given up on. */
+  watch: WslTreeWatch | null
 }
 
 export function createHistoryService({
   store,
   onChange,
   onTranscripts,
-  home = claudeHome()
+  home = claudeHome(),
+  watchDistro
 }: HistoryServiceDeps): HistoryService {
   const file = historyFileIn(home)
 
@@ -126,15 +154,24 @@ export function createHistoryService({
    */
   let distros: readonly WslHome[] = []
 
+  /** The same distros, keyed by lower-cased `claudeHome`, with what each one holds. */
+  const distroIndexes = new Map<string, DistroIndex>()
+  const indexOf = (where: string): DistroIndex | undefined => distroIndexes.get(where.toLowerCase())
+
   /**
    * Whether a recorded working directory is still there, in either spelling.
    *
-   * Runs once per distinct directory per pass, not once per session, which is
-   * what makes the extra UNC stats affordable - 55 directories on this machine.
+   * Runs once per distinct directory per pass, not once per session. That was
+   * called affordable when the directories were local; over `\\wsl$\` it was
+   * 54 stats at 1.8 ms each, on the main thread, every pass. So the answer is
+   * cached, stat'd synchronously only the first time a path is seen, and
+   * re-checked off the main thread after each pass - `existence.revalidate`,
+   * below, which schedules another pass only if something actually moved.
    */
+  const existence = createExistenceCache()
   const projectExists = (path: string): boolean => {
-    const resolved = resolveRecordedPath(path, distros, directoryExists)
-    return resolved !== null && directoryExists(resolved)
+    const resolved = resolveRecordedPath(path, distros, existence.exists)
+    return resolved !== null && existence.exists(resolved)
   }
 
   let last: HistorySummary = {
@@ -180,7 +217,19 @@ export function createHistoryService({
     // same single answer to "what can still be opened".
     const transcripts = new Map<string, TranscriptFile>()
     for (const where of homes) {
-      for (const [id, found] of scanTranscripts(projectsDirIn(where))) transcripts.set(id, found)
+      // A distro whose watcher is live answers from the map its events keep;
+      // this machine's home, and a distro left to the poll, are walked. A
+      // distro's map is dropped whenever its watch is not live, so that the
+      // next `onSync` walks once rather than trusting what it missed.
+      const distro = indexOf(where)
+      let found: Map<string, TranscriptFile>
+      if (distro?.watch?.live() === true) {
+        found = distro.transcripts.all()
+      } else {
+        distro?.transcripts.invalidate()
+        found = scanTranscripts(projectsDirIn(where))
+      }
+      for (const [id, entry] of found) transcripts.set(id, entry)
     }
 
     const next = indexHistory(store, { sources, transcripts, directoryExists: projectExists })
@@ -192,6 +241,19 @@ export function createHistoryService({
       next.error !== last.error
     last = next
     if (changed) onChange(next)
+
+    // Off the main thread, after the pass has said what it can: re-stat every
+    // directory it asked about, and only if one came or went run another pass
+    // to record it. Gated on `started` because this can land after `stop()`,
+    // and a pass then would write to a store `will-quit` has released.
+    void existence
+      .revalidate()
+      .then((moved) => {
+        if (moved && started) scheduleRefresh()
+      })
+      .catch((err: unknown) => {
+        console.warn(`project existence re-check failed: ${String(err)}`)
+      })
     // After the index, and outside its transaction: the archive is a separate
     // set of tables with a separate cursor, and a slow pass over a transcript
     // that has grown must not hold the write lock the launcher's list reads
@@ -221,21 +283,24 @@ export function createHistoryService({
   }
 
   /**
-   * One watch per home, rebuilt whenever the list of homes changes.
+   * One `fs.watch` per home, rebuilt whenever the list of homes changes.
    *
-   * **A distro's home never gets one.** Measured 2026-09-03: `fs.watch` over a
-   * `\\wsl$\` path throws `EISDIR` immediately - on the directory, on the
-   * directory recursively, and on the file itself - so the 9P share behind it
-   * carries no change notification of any kind. That is caught below and the
-   * home is simply left to the poll, which is the mechanism this was written
-   * around anyway: it stats every file and trusts no watch. The visible
-   * consequence is that a prompt typed in a distro reaches the launcher within
-   * the poll interval rather than within the debounce.
+   * **A distro's home never gets one of these.** Measured 2026-09-03:
+   * `fs.watch` over a `\\wsl$\` path throws `EISDIR` immediately - on the
+   * directory, on the directory recursively, and on the file itself - so the
+   * 9P share behind it carries no change notification of any kind. That is
+   * caught below. What a distro gets instead is `watchDistroTree`: a process
+   * inside the distribution, where inotify works, whose events arrive here in
+   * under a millisecond. Only a distro with no `inotifywait` is left to the
+   * poll, and for it the visible consequence is the old one - a prompt typed
+   * there reaches the launcher within the poll interval rather than the
+   * debounce.
    */
   function rewatch(): void {
     for (const open of watchers) open.close()
     watchers = []
     for (const path of filesOf()) {
+      if (indexOf(dirname(path)) !== undefined) continue
       try {
         // Non-recursive: the directory holds the whole `.claude` tree, and a
         // recursive watch over `projects/` would fire on every token a live
@@ -254,6 +319,39 @@ export function createHistoryService({
     }
   }
 
+  /**
+   * Starts the in-distro watcher for one home, once.
+   *
+   * Every event ends in `scheduleRefresh`, the same funnel as the `fs.watch`
+   * above, because a pass is what turns a moved entry into rows the launcher
+   * reads and bytes the archive copies. A transcript event first moves its one
+   * entry in the distro's map, so the pass that follows reads the map instead
+   * of walking - that is the whole saving. `onSync` drops the map so that pass
+   * walks once, since nothing that happened before the watch was in place was
+   * seen. Given up on, the home falls to the poll and `refresh` walks it as it
+   * always did.
+   */
+  function watchDistroTree(distro: DistroIndex): void {
+    if (watchDistro === undefined || distro.watch !== null) return
+    distro.watch = watchDistro(distro.home, {
+      onEvent(event) {
+        if (event.kind === 'transcript') distro.transcripts.apply(event.op, event.path, event.isDir)
+        scheduleRefresh()
+      },
+      onSync() {
+        distro.transcripts.invalidate()
+        scheduleRefresh()
+      },
+      onUnavailable(reason) {
+        distro.watch = null
+        distro.transcripts.invalidate()
+        console.warn(
+          `${distro.home.distro}: no change notification from inside the distribution (${reason}); its history is left to the poll`
+        )
+      }
+    })
+  }
+
   let started = false
 
   return {
@@ -270,8 +368,16 @@ export function createHistoryService({
       if (added.length === 0) return
       homes = [...homes, ...added.map((home) => home.claudeHome)]
       distros = [...distros, ...added]
+      for (const home of added) {
+        distroIndexes.set(home.claudeHome.toLowerCase(), {
+          home,
+          transcripts: createLiveTranscripts(projectsDirIn(home.claudeHome)),
+          watch: null
+        })
+      }
       if (!started) return
       rewatch()
+      for (const distro of distroIndexes.values()) watchDistroTree(distro)
       scheduleRefresh()
     },
 
@@ -279,6 +385,7 @@ export function createHistoryService({
       if (started) return
       started = true
       rewatch()
+      for (const distro of distroIndexes.values()) watchDistroTree(distro)
 
       let ticks = 0
       poll = setInterval(() => {
@@ -286,8 +393,11 @@ export function createHistoryService({
         // Size, not mtime: an append always changes it, and a stat that reports
         // no change costs nothing further. A file that cannot be stat'd reads
         // as -1, which is a change the next pass will report as an error.
+        // A distro whose watcher is live is skipped: the stat would be a 9P
+        // round trip to learn what the stream already says.
         let moved = false
         for (const path of filesOf()) {
+          if (indexOf(dirname(path))?.watch?.live() === true) continue
           let size: number
           try {
             size = statSync(path).size
@@ -320,6 +430,11 @@ export function createHistoryService({
       poll = null
       for (const open of watchers) open.close()
       watchers = []
+      for (const distro of distroIndexes.values()) {
+        distro.watch?.stop()
+        distro.watch = null
+        distro.transcripts.invalidate()
+      }
       lastSizes = new Map()
     }
   }

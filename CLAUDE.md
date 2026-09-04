@@ -390,6 +390,23 @@ is in the **`surfaces`** skill.
   transcript archive is **not** a second exception - it reads those files and
   copies what it reads into `helm.db`, and `pnpm transcript-check`'s T-5 hashes
   the whole tree either side of a full pass to say so.
+- **A distribution's `~/.claude` is watched from inside the distribution.**
+  `fs.watch` over `\\wsl$\` throws `EISDIR` - the 9P share carries no change
+  notification - and the poll that stood in for it re-walked the distro's
+  transcripts every sweep: measured 2026-09-03 at **777-873 ms of synchronous
+  main-thread time** over 1,066 transcripts, growing with every worktree, and
+  felt as typing that stops and then arrives all at once. So `main/wslwatch.ts`
+  runs `inotifywait` inside each distro Helm reads and takes its events over the
+  child's stdout - **0.8 ms** from a write in the distro to main - and the
+  distro's transcript map moves one entry per event (`core/discovery/
+  transcripts-live.ts`) instead of being rebuilt. No port, no token, no
+  listener: the network posture did not move, and this is not a second inbound
+  listener. Two things are not obvious: `wsl.exe --` hands the argv to the
+  user's **login shell to re-parse**, so the watcher is spawned with `--exec`;
+  and a distro with a watcher in it **does not idle down while Helm is open**.
+  Where `inotifywait` is absent the distro falls back to the poll it always had.
+  Project-directory existence, the other per-pass cost over 9P, is cached and
+  re-checked off the main thread (`core/discovery/existence.ts`).
 - **A session tab's state comes from Claude Code's own live registry**, and
   `~/.claude/sessions` is read exactly the way the rest of that tree is. The CLI
   writes one `<pid>.json` per running session carrying `busy` / `shell` /

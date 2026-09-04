@@ -1,6 +1,7 @@
 import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { samePath } from '../config/live'
 import { readTail } from './tail'
 
 /**
@@ -142,6 +143,11 @@ export interface TranscriptFile {
  */
 const TRANSCRIPT_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i
 
+/** Whether a file name is the shape of a session transcript. */
+export function isTranscriptName(name: string): boolean {
+  return TRANSCRIPT_NAME.test(name)
+}
+
 export function scanTranscripts(projectsDir: string): Map<string, TranscriptFile> {
   const found = new Map<string, TranscriptFile>()
 
@@ -156,40 +162,56 @@ export function scanTranscripts(projectsDir: string): Map<string, TranscriptFile
     return found
   }
 
-  for (const dir of dirs) {
-    const full = join(projectsDir, dir)
-    let names: string[]
-    try {
-      names = readdirSync(full)
-    } catch {
-      continue
-    }
-    for (const name of names) {
-      if (!TRANSCRIPT_NAME.test(name)) continue
-      const file = join(full, name)
-      let stats
-      try {
-        stats = statSync(file)
-      } catch {
-        continue
-      }
-      if (!stats.isFile()) continue
-      const sessionId = name.slice(0, -'.jsonl'.length).toLowerCase()
-      // A session id can appear under two project directories when the same
-      // folder was opened with different casing. Keep the larger file: it is
-      // the one with the conversation in it.
-      const existing = found.get(sessionId)
-      if (existing && existing.bytes >= stats.size) continue
-      found.set(sessionId, {
-        sessionId,
-        file,
-        bytes: stats.size,
-        modifiedMs: stats.mtimeMs
-      })
-    }
-  }
+  for (const dir of dirs) scanProjectDir(join(projectsDir, dir), found)
 
   return found
+}
+
+/**
+ * One project directory's transcripts, merged into `found`.
+ *
+ * Split out of the walk so that an index fed by events (`transcripts-live.ts`)
+ * can re-read the one directory an event named instead of the whole tree.
+ */
+export function scanProjectDir(full: string, found: Map<string, TranscriptFile>): void {
+  let names: string[]
+  try {
+    names = readdirSync(full)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (!TRANSCRIPT_NAME.test(name)) continue
+    recordTranscript(join(full, name), found)
+  }
+}
+
+/**
+ * Stats one transcript and records it. False when there is nothing there.
+ *
+ * A session id can appear under two project directories when the same folder
+ * was opened with different casing. Keep the larger file: it is the one with
+ * the conversation in it. The same file seen again always wins over its own
+ * earlier size, so an append - or a truncation - is recorded.
+ */
+export function recordTranscript(file: string, found: Map<string, TranscriptFile>): boolean {
+  let stats
+  try {
+    stats = statSync(file)
+  } catch {
+    return false
+  }
+  if (!stats.isFile()) return false
+  const sessionId = basename(file).slice(0, -'.jsonl'.length).toLowerCase()
+  const existing = found.get(sessionId)
+  if (existing && !samePath(existing.file, file) && existing.bytes >= stats.size) return false
+  found.set(sessionId, {
+    sessionId,
+    file,
+    bytes: stats.size,
+    modifiedMs: stats.mtimeMs
+  })
+  return true
 }
 
 /** Whether a recorded working directory is still a directory. */
