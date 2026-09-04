@@ -22,11 +22,34 @@ export function popupTmuxArgs(title: string): string {
 }
 
 export interface FzfLook {
-  /** The dim hint line under the prompt, e.g. `Enter new window here · Esc`. */
-  header: string
-  prompt?: string
+  /** What Enter does, e.g. `Enter new window here`; the hint line wraps it with the movement and search keys. */
+  hint: string
   /** A shell command with fzf `{N}` placeholders; given, the list gets a preview column. */
   preview?: string | undefined
+}
+
+/** The letters vim navigation takes; a row accelerator may not use one. */
+export const VIM_KEYS = ['j', 'k', 'g', 'G', 'q'] as const
+
+const SEARCH_KEY = '/'
+const SEARCH_PROMPT = '/ '
+
+/**
+ * The list opens with no input line and moves on vim keys; `/` shows the input
+ * and gives the letters back to typing, Esc there closes the search, and Esc
+ * with the search closed is a cancel. Enter accepts in both states. Measured on
+ * fzf 0.72: the query survives hide-input and clear-query only takes while the
+ * input is shown, so `/` clears it and Esc restores the rows with an empty
+ * `search()`.
+ */
+export const FZF_BINDS = [
+  'j:down,k:up,ctrl-n:down,ctrl-p:up,ctrl-d:half-page-down,ctrl-u:half-page-up,g:first,G:last,q:abort,esc:abort,enter:accept',
+  `${SEARCH_KEY}:show-input+clear-query+unbind(${[...VIM_KEYS, SEARCH_KEY].join(',')})+change-prompt(${SEARCH_PROMPT})+first`,
+  `esc:transform:[ "$FZF_INPUT_STATE" = hidden ] && echo abort || echo "hide-input+search()+rebind(${[...VIM_KEYS, SEARCH_KEY].join(',')})"`
+] as const
+
+export function hintLine(enter: string): string {
+  return `j/k move · ${SEARCH_KEY} search · ${enter} · q`
 }
 
 const FZF_COLOURS = [
@@ -46,7 +69,7 @@ const FZF_COLOURS = [
   `gutter:${PALETTE.panel}`
 ].join(',')
 
-/** fzf flags for a popup list: rows from the top with the prompt at the bottom, no chrome of its own, the palette, and `▸` on the current row. */
+/** fzf flags for a popup list: rows from the top, the hint at the bottom with the input hidden until `/`, no chrome of its own, the palette, and `▸` on the current row. */
 export function fzfArgs(look: FzfLook): string[] {
   const args = [
     '--ansi',
@@ -55,9 +78,10 @@ export function fzfArgs(look: FzfLook): string[] {
     '--no-separator',
     '--info=hidden',
     '--no-multi',
+    '--no-input',
+    ...FZF_BINDS.map((bind) => `--bind=${bind}`),
     '--pointer=▸',
-    `--prompt=${look.prompt ?? '> '}`,
-    `--header=${look.header}`,
+    `--header=${hintLine(look.hint)}`,
     `--color=${FZF_COLOURS}`
   ]
   if (look.preview !== undefined) args.push(`--preview=${look.preview}`, '--preview-window=right,45%,border-left')

@@ -14,7 +14,7 @@ export interface PickRow<T> {
 export interface PickLook {
   /** The word before `>` in the numbered fallback, e.g. `profile`. */
   name: string
-  /** The dim hint line: what Enter does, then `Esc`. */
+  /** What Enter does, e.g. `Enter new window here`; the hint line adds the movement and search keys around it. */
   hint: string
   /** A shell command fzf runs for the current row, with `{N}` naming the row's hidden keys. */
   preview?: string
@@ -35,13 +35,20 @@ export function pick<T>(rows: readonly PickRow<T>[], look: PickLook): T | null {
   return pickNumbered(rows, look.name)
 }
 
-/** Each fzf line is `index \t keys... \t label`; only the label is shown and searched. */
+/**
+ * Each fzf line is `index \t keys... \t label`; only the label is shown, and
+ * `--nth` is left alone because with `--with-nth` fzf counts fields on the
+ * shown line - `--nth=<hidden+1>..` named a field that no longer existed and
+ * every query matched nothing.
+ */
+export function pickerFzfArgs(look: PickLook, hiddenFields: number): string[] {
+  return [...fzfArgs({ hint: look.hint, preview: look.preview }), '--delimiter=\t', `--with-nth=${String(hiddenFields + 1)}..`]
+}
+
 function pickWithFzf<T>(rows: readonly PickRow<T>[], look: PickLook): T | null {
-  const hidden = 1 + (rows[0]?.keys?.length ?? 0)
-  const field = `${String(hidden + 1)}..`
   const result = spawnSync(
     'fzf',
-    [...fzfArgs({ header: look.hint, preview: look.preview }), '--delimiter=\t', `--with-nth=${field}`, `--nth=${field}`],
+    pickerFzfArgs(look, 1 + (rows[0]?.keys?.length ?? 0)),
     {
       input: rows.map((row, i) => [String(i), ...(row.keys ?? []), row.label].join('\t')).join('\n'),
       stdio: ['pipe', 'pipe', 'inherit'],

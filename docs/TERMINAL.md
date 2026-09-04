@@ -158,9 +158,10 @@ helm.nvim buffers, so the letters are the same everywhere.
 
 Every popup wears one look, mirrored from the owner's mockup: a rounded accent
 frame with the title in it, a dim hint line saying what Enter does, a `▸` on
-the current row over a raised cursor band, the `>` filter at the bottom, and for
-the profile picker a preview column showing the profile card that `helm
-profile show` prints. The palette lives once, in `theme.ts`, and tmux's frame
+the current row over a raised cursor band, and for the profile picker a
+preview column showing the profile card that `helm profile show` prints. The
+list moves on vim keys (`j`/`k`, `g`/`G`, `q` to leave) with no input line
+until `/` opens a search over the visible text, which Esc closes again. The palette lives once, in `theme.ts`, and tmux's frame
 flags, fzf's `--color` list and the commands' own text all read it from there.
 
 The cost is one keystroke per Helm action. A gesture that turns out to be
@@ -444,6 +445,11 @@ distribution convenience for later and changes nothing above.
   commands as truecolour painters, because three renderers painting three
   guesses at the same mockup drift the moment one of them changes; fzf 0.72
   rejects `--header-first=false`, so the flag is simply not passed.
+- 2026-09-04: The pickers stayed on fzf with `--no-input` and vim binds rather
+  than moving to a neovim picker, because a picker is short-lived and a popup,
+  and nvim would cost a process start and a plugin surface for a list. The
+  menu rows lost their letters: `k` is vim's up, so no letter could be an
+  accelerator without the set being uneven.
 
 ## Related
 

@@ -37,7 +37,7 @@ export const PROFILE_PREVIEW = 'helm profile show {2} --harness {3} --color'
  */
 export async function pickProfile(_ctx: CommandContext): Promise<number> {
   const entries = await knownProfiles()
-  const chosen = pick(profileRows(entries), { name: 'profile', hint: 'Enter new window here · Esc', preview: PROFILE_PREVIEW })
+  const chosen = pick(profileRows(entries), { name: 'profile', hint: 'Enter new window here', preview: PROFILE_PREVIEW })
   if (chosen === null || chosen.draft === null) return 0
   const command = ['helm', 'launch', chosen.name, '--harness', chosen.harness]
   if (insideTmux()) {
@@ -111,7 +111,7 @@ export function configScopes(harnesses: readonly string[], home: string = homedi
  */
 export async function pickScope(ctx: CommandContext): Promise<number> {
   const scopes = configScopes(await knownHarnesses())
-  const chosen = pick(scopeRows(scopes), { name: 'scope', hint: 'Enter → pane with nvim on that tree · Esc' })
+  const chosen = pick(scopeRows(scopes), { name: 'scope', hint: 'Enter → pane with nvim on that tree' })
   if (chosen === null) return 0
   // `--view` is the helm table's `c` row: pick in the popup, then open the pane
   // from inside it, because a shell one-liner in a tmux binding cannot quote

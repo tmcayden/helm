@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { PALETTE, colourEnabled, colours, columns, fzfArgs, popupTmuxArgs, stripAnsi } from './theme.ts'
+import { FZF_BINDS, PALETTE, VIM_KEYS, colourEnabled, colours, columns, fzfArgs, hintLine, popupTmuxArgs, stripAnsi } from './theme.ts'
 
 const present = (bin: string, args: string[]) => spawnSync(bin, args, { stdio: 'ignore' }).status === 0
 
@@ -26,8 +26,23 @@ describe('theme', () => {
     expect(popupTmuxArgs('helm')).toBe(`-b rounded -s 'bg=${PALETTE.panel},fg=${PALETTE.text}' -S 'fg=${PALETTE.accent}' -T ' helm '`)
   })
 
+  it('hides the input, moves on vim keys, and gives the letters back to typing behind /', () => {
+    const args = fzfArgs({ hint: 'Enter' })
+    expect(args).toContain('--no-input')
+    expect(args).toContain(`--header=${hintLine('Enter')}`)
+    expect(hintLine('Enter new window here')).toBe('j/k move · / search · Enter new window here · q')
+    const binds = args.filter((a) => a.startsWith('--bind=')).map((a) => a.slice('--bind='.length))
+    expect(binds).toEqual([...FZF_BINDS])
+    expect(binds[0]).toContain('j:down,k:up')
+    expect(binds[0]).toContain('q:abort,esc:abort,enter:accept')
+    expect(binds[1]).toMatch(/^\/:show-input\+clear-query\+unbind\(j,k,g,G,q,\/\)/)
+    expect(binds[2]).toContain('rebind(j,k,g,G,q,/)')
+    expect(binds[2]).toContain('"$FZF_INPUT_STATE" = hidden ] && echo abort')
+    for (const key of VIM_KEYS) expect(binds[1]).toContain(key)
+  })
+
   it.skipIf(!present('fzf', ['--version']))('produces flags fzf accepts, with and without a preview', () => {
-    for (const look of [{ header: 'h' }, { header: 'h', preview: 'echo {2}' }]) {
+    for (const look of [{ hint: 'h' }, { hint: 'h', preview: 'echo {2}' }]) {
       const run = spawnSync('fzf', [...fzfArgs(look), '--filter=a'], { input: 'a\nb', encoding: 'utf8' })
       expect(run.stderr, JSON.stringify(look)).toBe('')
       expect(run.stdout).toBe('a\n')
