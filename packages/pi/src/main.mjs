@@ -7,6 +7,8 @@ import {
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { mergeProfiles, stripHelmKeys } from './merge.mjs'
+import { RULES, locationProblem } from './location.mjs'
+import { validateLibraryFile } from './validate.mjs'
 
 const HOME = homedir()
 const CONFIG_FILE = join(HOME, '.config', 'helm', 'pi.json')
@@ -52,10 +54,24 @@ export function listMixins(library) {
 function readMixin(library, name) {
   const file = join(library, 'mixins', `${name}.json`)
   if (!existsSync(file)) fail(`no mixin '${name}' (${file}); have: ${listMixins(library).join(', ')}`)
-  const mixin = JSON.parse(readFileSync(file, 'utf8'))
-  if (mixin.extends) fail(`mixin '${name}' cannot extend; mixins are additive, not inherited`)
-  if (mixin.mixins) fail(`mixin '${name}' cannot list mixins; only profiles can`)
-  return mixin
+  return readLibraryFile(file, 'mixin')
+}
+
+// Every route into the library goes through here, so show, build, launch and
+// pick all gate on the same answer to "is this file well-formed".
+function readLibraryFile(file, kind) {
+  const raw = parseJson(file)
+  const problems = validateLibraryFile(raw, { file, kind })
+  if (problems.length > 0) fail(problems.join('\nhelm-pi: '))
+  return raw
+}
+
+function parseJson(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    fail(`${file}: not valid JSON (${error.message})`)
+  }
 }
 
 function readProfile(library, name, seen = [], warnings = []) {
@@ -64,7 +80,7 @@ function readProfile(library, name, seen = [], warnings = []) {
   if (!existsSync(file)) {
     fail(`no profile '${name}' (${file}); have: ${listProfiles(library).join(', ')}`)
   }
-  const profile = JSON.parse(readFileSync(file, 'utf8'))
+  const profile = readLibraryFile(file, 'profile')
   // Fold order is parent -> mixins -> this profile, so the leaf still wins
   // over its own mixins and you can pick a mixin and then tweak one field.
   const parent = profile.extends ? readProfile(library, profile.extends, [...seen, name], warnings) : {}
@@ -195,54 +211,6 @@ function locationOf(profile) {
   fail(`location must be "anywhere", { "requires": <rule> } or { "path": <dir> }`)
 }
 
-function insideGitRepo(dir) {
-  for (let at = dir, previous = null; at !== previous; previous = at, at = join(at, '..')) {
-    if (existsSync(join(at, '.git'))) return true
-  }
-  return false
-}
-
-// Repos sit either directly under the parent or one level down in repos/,
-// so the scan goes two deep and stops at the first one it finds.
-function hasChildRepo(dir) {
-  let children
-  try {
-    children = readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory())
-  } catch {
-    return false
-  }
-  for (const child of children) {
-    const path = join(dir, child.name)
-    if (existsSync(join(path, '.git'))) return true
-    let grandchildren
-    try {
-      grandchildren = readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory())
-    } catch {
-      continue
-    }
-    if (grandchildren.some((entry) => existsSync(join(path, entry.name, '.git')))) return true
-  }
-  return false
-}
-
-const RULES = {
-  'parent-of-repos': {
-    describe: 'a directory holding repositories, itself outside any git tree',
-    test: (dir) => (insideGitRepo(dir) ? 'it is inside a git repository' : hasChildRepo(dir) ? null : 'it holds no repositories')
-  },
-  'inside-git-repo': {
-    describe: 'a directory inside a git repository',
-    test: (dir) => (insideGitRepo(dir) ? null : 'it is not inside a git repository')
-  }
-}
-
-/** Null when the directory is allowed, else why it is not. */
-function locationProblem(location, dir) {
-  if (location.kind === 'anywhere') return null
-  if (location.kind === 'pinned') return location.path === dir ? null : `it is pinned to ${location.path}`
-  return RULES[location.rule].test(dir)
-}
-
 function launch(library, name, flags) {
   const { profile, dir, skipped } = build(library, name)
   const location = locationOf(profile)
@@ -365,6 +333,46 @@ function pickProfileName(library, prompt) {
   return (chosen.stdout ?? '').trim() || null
 }
 
+// A whole-library lint: every file is read and reported on, so one pass names
+// every problem instead of the first one a launch happened to hit.
+function checkLibrary(library) {
+  const profiles = listProfiles(library)
+  const mixins = listMixins(library)
+  const problems = []
+
+  const inspect = (file, kind, name) => {
+    let raw
+    try {
+      raw = JSON.parse(readFileSync(file, 'utf8'))
+    } catch (error) {
+      problems.push(`${file}: not valid JSON (${error.message})`)
+      return
+    }
+    problems.push(...validateLibraryFile(raw, { file, kind }))
+    if (kind !== 'profile') return
+    if (typeof raw.extends === 'string' && !profiles.includes(raw.extends)) {
+      problems.push(`${file}: extends '${raw.extends}', which is not a profile in the library. Have: ${profiles.join(', ')}.`)
+    }
+    for (const mixin of Array.isArray(raw.mixins) ? raw.mixins : []) {
+      if (typeof mixin === 'string' && !mixins.includes(mixin)) {
+        problems.push(`${file}: lists mixin '${mixin}', which is not in the library. Have: ${mixins.join(', ') || '(none)'}.`)
+      }
+    }
+    if (name === raw.extends) problems.push(`${file}: extends itself.`)
+  }
+
+  for (const name of profiles) inspect(join(library, 'profiles', `${name}.json`), 'profile', name)
+  for (const name of mixins) inspect(join(library, 'mixins', `${name}.json`), 'mixin', name)
+
+  for (const problem of problems) process.stderr.write(`helm-pi: ${problem}\n`)
+  const counted = `${profiles.length} profile${profiles.length === 1 ? '' : 's'}, ${mixins.length} mixin${mixins.length === 1 ? '' : 's'}`
+  if (problems.length > 0) {
+    process.stderr.write(`helm-pi: ${problems.length} problem${problems.length === 1 ? '' : 's'} across ${counted}\n`)
+    process.exit(1)
+  }
+  process.stdout.write(`${counted}: all valid\n`)
+}
+
 function main() {
   const [command, ...argv] = process.argv.slice(2)
   const flags = { rest: [], dryRun: false }
@@ -421,6 +429,9 @@ function main() {
     case 'mixins':
       for (const name of listMixins(library)) process.stdout.write(`${name}\n`)
       return
+    case 'check':
+      checkLibrary(library)
+      return
     default:
       process.stdout.write(
         'usage: helm-pi <command>\n' +
@@ -431,7 +442,8 @@ function main() {
         '  pick [--pane id]                      choose a profile and place it for the current pane\n' +
         '  menu [profile]                        compose a new profile, or edit an existing one\n' +
         '  edit [profile]                        pick a profile to edit (or pass a name)\n' +
-        '  mixins                                mixins in the library\n'
+        '  mixins                                mixins in the library\n' +
+        '  check                                 validate every profile and mixin; exits non-zero on any problem\n'
       )
       if (command) process.exit(2)
   }
