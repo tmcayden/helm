@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { FILTER_KEYS } from './merge.mjs'
 
 export function readSkills(library) {
   const root = join(library, 'skills')
@@ -150,6 +151,8 @@ export function emptyState() {
     mixins: [],
     skills: [],
     extensions: [],
+    prompts: [],
+    themes: [],
     location: 'anywhere',
     agentsMd: '',
     openingPrompt: '',
@@ -170,6 +173,9 @@ export function profileToState(profile, name) {
     mixins: profile.mixins ?? [],
     skills: libraryEntry?.skills ?? [],
     extensions: libraryEntry?.extensions ?? [],
+    // No UI picks these, so the menu's job is to carry them back out intact.
+    prompts: libraryEntry?.prompts ?? [],
+    themes: libraryEntry?.themes ?? [],
     location: profile.location ?? 'anywhere',
     agentsMd: profile.agentsMd ?? '',
     openingPrompt: profile.openingPrompt ?? '',
@@ -181,7 +187,7 @@ export function representableInMenu(profile) {
   const libraryEntry = (profile.packages ?? []).find((entry) => typeof entry === 'object' && entry.source === 'library')
   if (!libraryEntry) return true
   const complex = (arr) => (arr ?? []).some((glob) => glob.startsWith('!') || glob.includes('*'))
-  return !complex(libraryEntry.skills) && !complex(libraryEntry.extensions)
+  return FILTER_KEYS.every((key) => !complex(libraryEntry[key]))
 }
 
 export function stateToProfile(state) {
@@ -189,13 +195,12 @@ export function stateToProfile(state) {
   if (state.extends) profile.extends = state.extends
   if (state.mixins.length > 0) profile.mixins = state.mixins
   if (state.agentsMd) profile.agentsMd = state.agentsMd
-  profile.packages = ['npm:pi-claude-bridge']
-  if (state.skills.length > 0 || state.extensions.length > 0) {
-    const entry = { source: 'library' }
-    if (state.skills.length > 0) entry.skills = state.skills
-    if (state.extensions.length > 0) entry.extensions = state.extensions
-    profile.packages.push(entry)
-  }
+  // Every filter key is stated, [] included: an omitted key tells pi to load
+  // every resource of that type, which is the opposite of the library's
+  // allowlist convention and of what an empty menu row means.
+  const entry = { source: 'library' }
+  for (const key of FILTER_KEYS) entry[key] = state[key] ?? []
+  profile.packages = ['npm:pi-claude-bridge', entry]
   if (Object.keys(state.env).length > 0) profile.env = state.env
   profile.location = state.location
   if (state.openingPrompt) profile.openingPrompt = state.openingPrompt
