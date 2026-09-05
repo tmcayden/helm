@@ -150,10 +150,23 @@ describe('mixin restrictions', () => {
     expect(check({ mixins: ['other'] }, 'mixin')).toEqual([expect.stringContaining("a mixin cannot list 'mixins'")])
   })
 
+  it('rejects location on a mixin, however well-formed', () => {
+    const problems = check({ location: { path: '~/personal' } }, 'mixin')
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain(FILE)
+    expect(problems[0]).toContain("a mixin cannot set 'location'")
+    expect(check({ location: 'anywhere' }, 'mixin')).toHaveLength(1)
+  })
+
+  it('still accepts location on a profile', () => {
+    expect(check(valid({ location: { path: '~/personal' } }))).toEqual([])
+  })
+
   it('does not offer extends or mixins in a mixin\'s field list', () => {
     const problems = check({ frobnicate: 1 }, 'mixin')
     expect(problems[0]).toContain('A mixin may have:')
     expect(problems[0]).not.toContain('extends')
+    expect(problems[0]).not.toContain('location')
   })
 })
 

@@ -10,9 +10,14 @@ export const PROFILE_FIELDS = [
   'packages', 'settings', 'env', 'location', 'openingPrompt', 'cwd'
 ]
 
-// A mixin is additive, so the two fields that describe an inheritance chain are
-// the profile's alone.
-const MIXIN_ONLY_EXCLUDES = ['extends', 'mixins']
+// A mixin is additive. The two fields describing an inheritance chain are the
+// profile's alone, and so is `location`: listing a mixin to pick up a skill
+// must never move or pin where the profile launches.
+const MIXIN_REFUSES = {
+  extends: `a mixin cannot 'extends'. Mixins are additive, not inherited - put the extends on the profile that lists this mixin.`,
+  mixins: `a mixin cannot list 'mixins'. Only a profile composes a chain; a mixin that needs another mixin's contents must state them itself.`,
+  location: `a mixin cannot set 'location'. Where a profile runs is the profile's own call - a mixin that pinned it would move the launch directory of everything that lists it.`
+}
 
 const list = (items) => items.join(', ')
 
@@ -55,13 +60,11 @@ export function validateLibraryFile(raw, { file, kind = 'profile' } = {}) {
     return problems
   }
 
-  const known = kind === 'mixin' ? PROFILE_FIELDS.filter((f) => !MIXIN_ONLY_EXCLUDES.includes(f)) : PROFILE_FIELDS
+  const known = kind === 'mixin' ? PROFILE_FIELDS.filter((f) => !(f in MIXIN_REFUSES)) : PROFILE_FIELDS
   for (const field of Object.keys(raw)) {
     if (known.includes(field)) continue
-    if (kind === 'mixin' && MIXIN_ONLY_EXCLUDES.includes(field)) {
-      at(field === 'extends'
-        ? `a mixin cannot 'extends'. Mixins are additive, not inherited - put the extends on the profile that lists this mixin.`
-        : `a mixin cannot list 'mixins'. Only a profile composes a chain; a mixin that needs another mixin's contents must state them itself.`)
+    if (kind === 'mixin' && field in MIXIN_REFUSES) {
+      at(MIXIN_REFUSES[field])
       continue
     }
     const suggestion = nearest(field, known)
@@ -82,7 +85,7 @@ export function validateLibraryFile(raw, { file, kind = 'profile' } = {}) {
     }
   }
 
-  if ('location' in raw) problems.push(...locationProblems(raw.location, file))
+  if ('location' in raw && kind !== 'mixin') problems.push(...locationProblems(raw.location, file))
   if ('packages' in raw) problems.push(...packageProblems(raw.packages, file))
   return problems
 }
