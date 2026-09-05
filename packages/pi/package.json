@@ -1,0 +1,11 @@
+{
+  "name": "@helm/pi",
+  "version": "0.1.0",
+  "description": "Helm's pi composer: builds disposable agent dirs from the pi-library and launches pi in herdr workspaces.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "helm-pi": "src/main.mjs"
+  }
+}
